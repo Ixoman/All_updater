@@ -9,9 +9,21 @@ interface UpdateCardProps {
     update: AppUpdate;
     isSelected: boolean;
     onToggle: () => void;
+    releaseNotesUrl?: string | null;
+    isLoadingReleaseNotes?: boolean;
+    onOpenReleaseNotes?: () => void;
+    onIgnoreFor7Days?: () => void;
 }
 
-export const UpdateCard: React.FC<UpdateCardProps> = ({ update, isSelected, onToggle }) => {
+export const UpdateCard: React.FC<UpdateCardProps> = ({
+    update,
+    isSelected,
+    onToggle,
+    releaseNotesUrl,
+    isLoadingReleaseNotes = false,
+    onOpenReleaseNotes,
+    onIgnoreFor7Days
+}) => {
     const { t } = useLanguage();
     const normalizedInstalledVersion = update.version.trim().toLowerCase();
     const isUnknown =
@@ -24,6 +36,7 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({ update, isSelected, onTo
         normalizedInstalledVersion === '-';
     const isInapplicable = update.previousStatus === 'inapplicable';
     const isManualUninstall = update.previousDetails?.includes('Manual uninstall') || update.previousDetails?.includes('diferente');
+    const isReleaseNotesUnavailable = releaseNotesUrl === null;
 
     return (
         <motion.div
@@ -70,21 +83,60 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({ update, isSelected, onTo
                             {isManualUninstall ? t('updateManualUninstall') : t('updateInapplicable')}
                         </div>
                     ) : (
-                        <div className="mt-3 flex flex-wrap items-center gap-3 text-sm sm:flex-nowrap sm:gap-4">
-                            <div className="flex flex-col">
-                                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-900 dark:text-slate-500">{t('current')}</span>
-                                <span className={clsx("font-bold text-sm", isUnknown ? "text-amber-800" : "text-black dark:text-gray-300")}>
-                                    {isUnknown ? (
-                                        <span className="flex items-center gap-1">
-                                            <AlertCircle className="h-3 w-3" /> {t('unknown')}
-                                        </span>
-                                    ) : update.version}
-                                </span>
+                        <div className="mt-3 space-y-2">
+                            <div className="flex flex-wrap items-center gap-3 text-sm sm:flex-nowrap sm:gap-4">
+                                <div className="flex flex-col">
+                                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-900 dark:text-slate-500">{t('current')}</span>
+                                    <span className={clsx("font-bold text-sm", isUnknown ? "text-amber-800" : "text-black dark:text-gray-300")}>
+                                        {isUnknown ? (
+                                            <span className="flex items-center gap-1">
+                                                <AlertCircle className="h-3 w-3" /> {t('unknown')}
+                                            </span>
+                                        ) : update.version}
+                                    </span>
+                                </div>
+                                <ArrowRight className="h-4 w-4 text-slate-500" />
+                                <div className="flex flex-col">
+                                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-900 dark:text-slate-500">{t('new')}</span>
+                                    <span className="font-bold text-sm text-emerald-700 dark:text-emerald-400">{update.available}</span>
+                                </div>
                             </div>
-                            <ArrowRight className="h-4 w-4 text-slate-500" />
-                            <div className="flex flex-col">
-                                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-900 dark:text-slate-500">{t('new')}</span>
-                                <span className="font-bold text-sm text-emerald-700 dark:text-emerald-400">{update.available}</span>
+                            <div className="flex flex-wrap items-center gap-3">
+                                {onOpenReleaseNotes && (
+                                    <button
+                                        type="button"
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            if (isLoadingReleaseNotes || isReleaseNotesUnavailable) return;
+                                            onOpenReleaseNotes();
+                                        }}
+                                        disabled={isLoadingReleaseNotes || isReleaseNotesUnavailable}
+                                        className={clsx(
+                                            "text-xs font-semibold underline decoration-dotted underline-offset-2 transition-colors",
+                                            isLoadingReleaseNotes || isReleaseNotesUnavailable
+                                                ? "cursor-default text-slate-500 dark:text-slate-400"
+                                                : "text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200"
+                                        )}
+                                    >
+                                        {isLoadingReleaseNotes
+                                            ? t('releaseNotesLoading')
+                                            : isReleaseNotesUnavailable
+                                                ? t('releaseNotesUnavailableShort')
+                                                : t('releaseNotes')}
+                                    </button>
+                                )}
+                                {onIgnoreFor7Days && (
+                                    <button
+                                        type="button"
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            onIgnoreFor7Days();
+                                        }}
+                                        className="text-xs font-semibold text-amber-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-200"
+                                    >
+                                        {t('ignoreFor7Days')}
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}

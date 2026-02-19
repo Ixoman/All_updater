@@ -8,6 +8,7 @@ import { HistoryService } from './services/history.js';
 import { AppUpdateService } from './services/app-update.js';
 import { PreflightService } from './services/preflight.js';
 import { DiagnosticsService } from './services/diagnostics.js';
+import { IgnoreService } from './services/ignore.js';
 import type { HistoryItem } from '../shared/types.js';
 import log from 'electron-log/main'; // Import directly to access transport
 
@@ -20,6 +21,7 @@ const systemService = new SystemService();
 const appUpdateService = new AppUpdateService();
 const preflightService = new PreflightService();
 const diagnosticsService = new DiagnosticsService(logger);
+const ignoreService = new IgnoreService();
 
 const settingKeys: readonly (keyof UserSettings)[] = [
     'theme',
@@ -82,6 +84,17 @@ export function setupIPC() {
         return await wingetService.installUpdate(id, (logLine) => {
             event.sender.send('winget:log', logLine);
         });
+    });
+
+    ipcMain.handle('winget:get-release-notes-url', async (_, id: string) => {
+        if (!id || typeof id !== 'string') {
+            throw new Error('Invalid package id');
+        }
+        return await wingetService.getReleaseNotesUrl(id);
+    });
+
+    ipcMain.handle('winget:get-health', async () => {
+        return await wingetService.getHealth();
     });
 
     // System Restore
@@ -159,6 +172,10 @@ export function setupIPC() {
         return (await import('electron')).app.getPath('userData');
     });
 
+    ipcMain.handle('system:check-data-folder', async () => {
+        return systemService.checkUserDataWritable();
+    });
+
     ipcMain.handle('system:open-url', async (_, url: string) => {
         if (!/^https?:\/\//i.test(url)) {
             throw new Error('Invalid URL protocol');
@@ -171,6 +188,16 @@ export function setupIPC() {
             throw new Error('Invalid path.');
         }
         await shell.showItemInFolder(targetPath);
+    });
+
+    ipcMain.handle('system:open-path', async (_, targetPath: string) => {
+        if (!targetPath || typeof targetPath !== 'string') {
+            throw new Error('Invalid path.');
+        }
+        const error = await shell.openPath(targetPath);
+        if (error) {
+            throw new Error(error);
+        }
     });
 
     ipcMain.handle('system:open-system-restore', async () => {
@@ -206,8 +233,20 @@ export function setupIPC() {
     ipcMain.handle('history:add', async (_, entry: Omit<HistoryItem, 'date'>) => historyService.addEntry(entry));
     ipcMain.handle('history:clear', async () => {
         historyService.clearHistory();
+        ignoreService.clearAll();
         settingsService.set('language', 'en');
         settingsService.set('hasSeenOnboarding', false);
+    });
+
+    // Ignore rules
+    ipcMain.handle('ignore:get-active', async () => {
+        return ignoreService.getActiveRules();
+    });
+    ipcMain.handle('ignore:add-temporary', async (_, id: string, availableVersion: string | undefined, days: number) => {
+        if (!id || typeof id !== 'string') {
+            throw new Error('Invalid package id');
+        }
+        return ignoreService.addTemporaryIgnore(id, availableVersion, days);
     });
 
     // Logger Pass-through

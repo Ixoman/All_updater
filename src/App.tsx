@@ -11,11 +11,14 @@ import { HistoryView } from './components/HistoryView.tsx';
 import type {
   AppUpdate,
   AppVersionCheckResult,
+  DataFolderStatus,
   HistoryItem,
+  IgnoreRule,
   PreflightResult,
   RestoreFailureReason,
   RestorePointResult,
-  RestorePointVerificationResult
+  RestorePointVerificationResult,
+  WingetHealthStatus
 } from './shared/types';
 import { RefreshCw, CheckCircle, Coffee, ArrowDownToLine, CheckSquare, Square, AlertCircle, XCircle, AlertTriangle, FileText, FolderOpen, Wifi, WifiOff } from 'lucide-react';
 import { ToastContainer, type ToastType } from './components/Toast';
@@ -36,6 +39,7 @@ interface RestoreVerificationSummaryState {
 
 type ThemeMode = 'dark' | 'light' | 'system';
 type AppProgressMode = 'real' | 'estimated';
+let hasRunInitialAppVersionCheck = false;
 
 const parsePercentFromWingetLog = (logLine: string): number | null => {
   const matches = Array.from(logLine.matchAll(/(^|[^0-9])([0-9]{1,3})%(?![0-9])/g));
@@ -72,8 +76,22 @@ const parseEstimatedPercentFromWingetLog = (logLine: string): number | null => {
   return null;
 };
 
+const normalizeIgnoreVersion = (value?: string): string => (value || '').trim();
+
+const buildIgnoreRuleKey = (id: string, availableVersion?: string): string => {
+  const normalizedVersion = normalizeIgnoreVersion(availableVersion);
+  return normalizedVersion ? `${id}@@${normalizedVersion}` : `${id}@@*`;
+};
+
+const isUpdateIgnoredByRule = (update: AppUpdate, rule: IgnoreRule): boolean => {
+  if (rule.id !== update.id) return false;
+  const normalizedRuleVersion = normalizeIgnoreVersion(rule.availableVersion);
+  if (!normalizedRuleVersion) return true;
+  return normalizedRuleVersion === normalizeIgnoreVersion(update.available);
+};
+
 export default function App() {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
   const [updates, setUpdates] = useState<AppUpdate[]>([]);
   const [loading, setLoading] = useState(false);
   const [hasChecked, setHasChecked] = useState(false);
@@ -104,22 +122,39 @@ export default function App() {
   const [downloadingAppUpdate, setDownloadingAppUpdate] = useState(false);
   const [appUpdateProgress, setAppUpdateProgress] = useState<number | null>(null);
   const [lastDownloadedUpdatePath, setLastDownloadedUpdatePath] = useState<string | null>(null);
+  const [downloadGuideState, setDownloadGuideState] = useState<{ filePath: string, isZip: boolean } | null>(null);
   const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
   const [runningPreflight, setRunningPreflight] = useState(false);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const [isOnline, setIsOnline] = useState(typeof navigator === 'undefined' ? true : navigator.onLine);
   const [restoreVerificationSummary, setRestoreVerificationSummary] = useState<RestoreVerificationSummaryState | null>(null);
+  const [releaseNotesUrlById, setReleaseNotesUrlById] = useState<Partial<Record<string, string | null>>>({});
+  const [releaseNotesLoadingById, setReleaseNotesLoadingById] = useState<Partial<Record<string, boolean>>>({});
+  const [ignoredUntilById, setIgnoredUntilById] = useState<Partial<Record<string, string>>>({});
+  const [ignoredHiddenCount, setIgnoredHiddenCount] = useState(0);
+  const [wingetHealth, setWingetHealth] = useState<WingetHealthStatus | null>(null);
+  const [checkingWingetHealth, setCheckingWingetHealth] = useState(false);
+  const [dataFolderStatus, setDataFolderStatus] = useState<DataFolderStatus | null>(null);
+  const [estimatedRemainingSeconds, setEstimatedRemainingSeconds] = useState<number | null>(null);
   const initializedRef = useRef(false);
   const themeSaveAttemptRef = useRef(0);
   const historyWriteWarningShownRef = useRef(false);
   const pendingSelectedIdsRef = useRef<Set<string> | null>(null);
   const estimatedProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const batchTimingRef = useRef<{ startedAt: number, total: number, completed: number } | null>(null);
+  const lastDataFolderWritableRef = useRef<boolean | null>(null);
   const selectableUpdates = updates.filter(u => u.previousStatus !== 'inapplicable');
   const allSelectableSelected = selectableUpdates.length > 0 && selectedIds.size === selectableUpdates.length;
+  const activeIgnoredRulesCount = Object.keys(ignoredUntilById).length;
   const getErrorMessage = (error: unknown): string => {
     if (error instanceof Error) return error.message;
     return String(error);
   };
+
+  const addToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts(prev => [...prev, { id, message, type }]);
+  }, []);
 
   const getRestoreFailureMessage = (reason?: RestoreFailureReason): string => {
     if (reason === 'system-protection-disabled') return t('restoreFailDisabled');
@@ -159,6 +194,41 @@ export default function App() {
       });
     }, 1200);
   }, [stopEstimatedAppProgress]);
+
+  const refreshDataFolderStatus = useCallback(async (silent = true) => {
+    try {
+      const status = await window.ipcRenderer.invoke('system:check-data-folder');
+      setDataFolderStatus(status);
+      const previousWritable = lastDataFolderWritableRef.current;
+      lastDataFolderWritableRef.current = status.writable;
+
+      const becameNotWritable = previousWritable === true && !status.writable;
+      const firstDetectionNotWritable = previousWritable === null && !status.writable;
+      if (!silent ? !status.writable : (becameNotWritable || firstDetectionNotWritable)) {
+        addToast(t('dataFolderNotWritableToast'), 'error');
+      }
+    } catch (error) {
+      console.error('[App] Failed to validate data folder:', error);
+    }
+  }, [addToast, t]);
+
+  const refreshWingetHealth = useCallback(async (silent = true) => {
+    setCheckingWingetHealth(true);
+    try {
+      const status = await window.ipcRenderer.invoke('winget:get-health');
+      setWingetHealth(status);
+      if (!silent && (!status.installed || !status.sourcesHealthy)) {
+        addToast(t('wingetHealthNeedsAttention'), 'warning');
+      }
+    } catch (error) {
+      console.error('[App] Failed to read winget health:', error);
+      if (!silent) {
+        addToast(t('wingetHealthUnknown'), 'warning');
+      }
+    } finally {
+      setCheckingWingetHealth(false);
+    }
+  }, [addToast, t]);
 
   useEffect(() => {
     const handleLog = (_event: unknown, log: string) => {
@@ -218,14 +288,21 @@ export default function App() {
         setShowOnboarding(true);
       }
 
-      void window.ipcRenderer
-        .invoke('system:check-app-update')
-        .then((result) => setAppUpdateInfo(result))
-        .catch((error) => console.error('[App] Silent app-update check failed:', error));
+      await refreshDataFolderStatus(false);
+
+      if (!hasRunInitialAppVersionCheck) {
+        hasRunInitialAppVersionCheck = true;
+        void window.ipcRenderer
+          .invoke('system:check-app-update')
+          .then((result) => setAppUpdateInfo(result))
+          .catch((error) => console.error('[App] Silent app-update check failed:', error));
+      }
+
+      void refreshWingetHealth(true);
     };
 
     void initializeApp();
-  }, []);
+  }, [refreshDataFolderStatus, refreshWingetHealth]);
 
   useEffect(() => {
     const handleAppUpdateProgress = (_event: unknown, progress: { percent: number | null }) => {
@@ -264,10 +341,73 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const handleFocus = () => { void refreshDataFolderStatus(true); };
+    window.addEventListener('focus', handleFocus);
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      void refreshDataFolderStatus(true);
+    }, 180000);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.clearInterval(intervalId);
+    };
+  }, [refreshDataFolderStatus]);
+
+  useEffect(() => {
+    const handleFocus = () => { void refreshWingetHealth(true); };
+    const handleOnlineRefresh = () => { void refreshWingetHealth(true); };
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('online', handleOnlineRefresh);
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      void refreshWingetHealth(true);
+    }, 300000);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('online', handleOnlineRefresh);
+      window.clearInterval(intervalId);
+    };
+  }, [refreshWingetHealth]);
+
+  useEffect(() => {
     if (typeof document === 'undefined') return;
     document.documentElement.classList.toggle('dark', darkMode);
     document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
   }, [darkMode]);
+
+  useEffect(() => {
+    if (!isInstalling || !batchTimingRef.current || !installProgress) {
+      setEstimatedRemainingSeconds(null);
+      return;
+    }
+
+    const updateEstimate = () => {
+      const timing = batchTimingRef.current;
+      if (!timing) {
+        setEstimatedRemainingSeconds(null);
+        return;
+      }
+
+      const completed = installProgress.current;
+      const total = installProgress.total;
+      if (completed <= 0 || total <= 0 || completed >= total) {
+        setEstimatedRemainingSeconds(completed >= total ? 0 : null);
+        return;
+      }
+
+      const elapsedMs = Math.max(0, Date.now() - timing.startedAt);
+      const averagePerCompletedMs = elapsedMs / completed;
+      const remainingItems = Math.max(0, total - completed);
+      const estimateSeconds = Math.round((averagePerCompletedMs * remainingItems) / 1000);
+      setEstimatedRemainingSeconds(Math.max(0, estimateSeconds));
+    };
+
+    updateEstimate();
+    const intervalId = setInterval(updateEstimate, 1000);
+    return () => clearInterval(intervalId);
+  }, [installProgress, isInstalling]);
 
   const toggleTheme = () => {
     const previousMode = themeMode;
@@ -294,11 +434,6 @@ export default function App() {
         addToast(t('settingsSaveWarning'), 'warning');
       });
     }
-  };
-
-  const addToast = (message: string, type: ToastType = 'info') => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setToasts(prev => [...prev, { id, message, type }]);
   };
 
   const removeToast = (id: string) => {
@@ -358,6 +493,7 @@ export default function App() {
     setDownloadingAppUpdate(true);
     setAppUpdateProgress(0);
     setLastDownloadedUpdatePath(null);
+    setDownloadGuideState(null);
     try {
       const result = await window.ipcRenderer.invoke(
         'system:download-app-update',
@@ -373,8 +509,10 @@ export default function App() {
 
       if (result.success) {
         addToast(t('appUpdateDownloadSuccess'), 'success');
+        const isZip = !!appUpdateInfo?.assetName && /\.zip$/i.test(appUpdateInfo.assetName);
         if (result.filePath) {
           setLastDownloadedUpdatePath(result.filePath);
+          setDownloadGuideState({ filePath: result.filePath, isZip });
           addToast(`${t('appUpdateSavedTo')} ${result.filePath}`, 'info');
         }
         if (result.hashVerified) {
@@ -382,7 +520,6 @@ export default function App() {
         } else {
           addToast(t('appUpdateHashUnavailable'), 'warning');
         }
-        const isZip = !!appUpdateInfo?.assetName && /\.zip$/i.test(appUpdateInfo.assetName);
         addToast(isZip ? t('appUpdateAfterDownloadZip') : t('appUpdateAfterDownloadExe'), 'warning');
         return;
       }
@@ -426,18 +563,119 @@ export default function App() {
     }
   };
 
+  const formatLocalDateTime = (isoDate: string): string => {
+    const parsed = new Date(isoDate);
+    if (Number.isNaN(parsed.getTime())) return isoDate;
+    const locale = language === 'es' ? 'es-ES' : 'en-US';
+    return parsed.toLocaleString(locale, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const formatCompactText = (value: string, limit = 220): string => {
+    const compact = value.replace(/\s+/g, ' ').trim();
+    if (compact.length <= limit) return compact;
+    return `${compact.slice(0, limit)}...`;
+  };
+
+  const openReleaseNotesForUpdate = async (update: AppUpdate) => {
+    const { id } = update;
+    const cachedUrl = releaseNotesUrlById[id];
+    if (typeof cachedUrl === 'string' && cachedUrl.length > 0) {
+      try {
+        await window.ipcRenderer.invoke('system:open-url', cachedUrl);
+      } catch (error) {
+        console.error(`[App] Failed to open cached release notes URL for ${id}:`, error);
+        addToast(t('releaseNotesUnavailable'), 'warning');
+      }
+      return;
+    }
+
+    if (cachedUrl === null) {
+      addToast(t('releaseNotesUnavailable'), 'info');
+      return;
+    }
+
+    if (releaseNotesLoadingById[id]) return;
+    setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: true }));
+
+    try {
+      const fetchedUrl = await window.ipcRenderer.invoke('winget:get-release-notes-url', id);
+      const normalizedUrl = fetchedUrl && fetchedUrl.trim().length > 0 ? fetchedUrl : null;
+      setReleaseNotesUrlById((prev) => ({ ...prev, [id]: normalizedUrl }));
+
+      if (normalizedUrl) {
+        await window.ipcRenderer.invoke('system:open-url', normalizedUrl);
+      } else {
+        addToast(t('releaseNotesUnavailable'), 'info');
+      }
+    } catch (error) {
+      console.error(`[App] Failed to fetch release notes for ${id}:`, error);
+      setReleaseNotesUrlById((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      addToast(t('releaseNotesCheckFailed'), 'warning');
+    } finally {
+      setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const ignoreUpdateForSevenDays = async (update: AppUpdate) => {
+    try {
+      const rule = await window.ipcRenderer.invoke('ignore:add-temporary', update.id, update.available, 7) as IgnoreRule;
+      const ruleKey = buildIgnoreRuleKey(rule.id, rule.availableVersion);
+      setIgnoredUntilById((prev) => ({ ...prev, [ruleKey]: rule.until }));
+      setUpdates((prev) => prev.filter((item) => item.id !== update.id));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(update.id);
+        return next;
+      });
+      addToast(
+        t('ignoreApplied')
+          .replace('{app}', update.name)
+          .replace('{date}', formatLocalDateTime(rule.until)),
+        'info'
+      );
+    } catch (error) {
+      console.error(`[App] Failed to ignore update ${update.id}:`, error);
+      addToast(t('ignoreApplyFailed'), 'error');
+    }
+  };
+
   const checkUpdates = async () => {
     setLoading(true);
     setUpdates([]);
+    setReleaseNotesUrlById({});
+    setReleaseNotesLoadingById({});
+    setIgnoredHiddenCount(0);
     setHasChecked(false);
     const minLoadTime = new Promise(resolve => setTimeout(resolve, 800));
     const fetchUpdates = window.ipcRenderer.invoke('winget:check-updates');
+    const fetchIgnoreRules = window.ipcRenderer.invoke('ignore:get-active');
 
     try {
-      const [available] = await Promise.all([fetchUpdates, minLoadTime]);
-      setUpdates(available);
+      const [available, activeIgnoreRules] = await Promise.all([fetchUpdates, fetchIgnoreRules, minLoadTime]) as [AppUpdate[], IgnoreRule[], unknown];
+      const activeIgnoreMap = Object.fromEntries(
+        activeIgnoreRules.map((rule) => [buildIgnoreRuleKey(rule.id, rule.availableVersion), rule.until])
+      );
+      setIgnoredUntilById(activeIgnoreMap);
+      const filteredAvailable = available.filter((update) => !activeIgnoreRules.some((rule) => isUpdateIgnoredByRule(update, rule)));
+      const hiddenCount = available.length - filteredAvailable.length;
+      setIgnoredHiddenCount(hiddenCount);
+      if (hiddenCount > 0) {
+        addToast(t('ignoreHiddenCount').replace('{count}', String(hiddenCount)), 'info');
+      }
+
+      setUpdates(filteredAvailable);
       // Only auto-select updates that are NOT inapplicable
-      const installable = available.filter((u) => u.previousStatus !== 'inapplicable');
+      const installable = filteredAvailable.filter((u) => u.previousStatus !== 'inapplicable');
       const installableIds = new Set(installable.map((u) => u.id));
       setSelectedIds((previous) => {
         const preserved = new Set(Array.from(previous).filter((id) => installableIds.has(id)));
@@ -448,6 +686,7 @@ export default function App() {
       });
       setHasChecked(true);
       setIsWingetMissing(false);
+      void refreshWingetHealth(true);
     } catch (error: unknown) {
       const errorMessage = getErrorMessage(error);
       console.error("[App] Failed to check updates:", error);
@@ -600,6 +839,8 @@ export default function App() {
       let current = 0;
       const currentResults: HistoryItem[] = [];
       setInstallProgress({ current, total });
+      batchTimingRef.current = { startedAt: Date.now(), total, completed: 0 };
+      setEstimatedRemainingSeconds(null);
 
       const queue = Array.from(selectedSnapshot);
 
@@ -720,6 +961,9 @@ export default function App() {
         }
         current++;
         setInstallProgress({ current, total });
+        if (batchTimingRef.current) {
+          batchTimingRef.current.completed = current;
+        }
         stopEstimatedAppProgress();
         setCurrentAppProgress(null);
         setCurrentAppProgressMode(null);
@@ -798,6 +1042,8 @@ export default function App() {
       setCurrentLogLine(null);
       setCurrentAppProgress(null);
       setCurrentAppProgressMode(null);
+      setEstimatedRemainingSeconds(null);
+      batchTimingRef.current = null;
       setConflictState(null);
       setRestoreDecisionState(null);
       setPreflightResult(null);
@@ -812,7 +1058,7 @@ export default function App() {
   };
 
   const retryFailedFromSummary = async () => {
-    const retryableStatuses = new Set(['failed', 'in-use', 'inapplicable', 'security-error']);
+    const retryableStatuses = new Set(['failed', 'in-use', 'security-error']);
     const availableIds = new Set(updates.map((u) => u.id));
     const retryIds = batchResults
       .filter((item) => retryableStatuses.has(item.status))
@@ -833,7 +1079,11 @@ export default function App() {
   const summaryFailedCount = batchResults.filter(
     r => r.status === 'failed' || r.status === 'inapplicable' || r.status === 'in-use' || r.status === 'security-error'
   ).length;
-  const retryableStatuses = new Set(['failed', 'in-use', 'inapplicable', 'security-error']);
+  const summaryUpdatedCount = batchResults.filter((r) => r.status === 'success').length;
+  const summaryRebootCount = batchResults.filter((r) => r.status === 'reboot').length;
+  const summaryNoChangeCount = batchResults.filter((r) => r.status === 'inapplicable' || r.status === 'skipped').length;
+  const summaryActionNeededCount = batchResults.filter((r) => r.status === 'failed' || r.status === 'in-use' || r.status === 'security-error').length;
+  const retryableStatuses = new Set(['failed', 'in-use', 'security-error']);
   const availableUpdateIds = new Set(updates.map((u) => u.id));
   const retryableSummaryIds = batchResults
     .filter((r) => retryableStatuses.has(r.status))
@@ -900,6 +1150,18 @@ export default function App() {
                 >
                   <FileText className={clsx("h-5 w-5", exportingDiagnostics && "animate-pulse")} />
                   <span className="text-xs font-semibold">{t('exportDiagnosticsAction')}</span>
+                </button>
+              )}
+
+              {!isInstalling && !isCreatingRestore && (
+                <button
+                  onClick={() => { void refreshWingetHealth(false); }}
+                  disabled={checkingWingetHealth}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-slate-900 shadow-sm transition-all hover:bg-gray-50 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto dark:border-white/10 dark:bg-white/5 dark:text-sky-200 dark:hover:bg-white/10 dark:hover:text-blue-400"
+                  title={t('wingetHealthRefresh')}
+                >
+                  <RefreshCw className={clsx("h-5 w-5", checkingWingetHealth && "animate-spin")} />
+                  <span className="text-xs font-semibold">{t('wingetHealthRefresh')}</span>
                 </button>
               )}
 
@@ -993,6 +1255,73 @@ export default function App() {
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {dataFolderStatus && !dataFolderStatus.writable && (
+            <div className="rounded-xl border border-red-300 bg-red-50 p-4 dark:border-red-900/40 dark:bg-red-900/20">
+              <p className="text-sm font-bold text-red-900 dark:text-red-300">{t('dataFolderNotWritableTitle')}</p>
+              <p className="mt-1 text-xs font-medium text-red-800 dark:text-red-200">{t('dataFolderNotWritableBody')}</p>
+              <p className="mt-2 break-all rounded border border-red-200 bg-white px-2 py-1 text-[11px] font-mono text-slate-900 dark:border-red-900/40 dark:bg-black/20 dark:text-sky-100">
+                {dataFolderStatus.path}
+              </p>
+              <button
+                onClick={() => window.ipcRenderer.invoke('system:open-path', dataFolderStatus.path)}
+                className="mt-2 rounded border border-red-300 bg-white px-2 py-1 text-xs font-bold text-red-700 hover:bg-red-100 dark:border-red-900/40 dark:bg-white/5 dark:text-red-300 dark:hover:bg-red-900/20"
+              >
+                {t('openDataFolder')}
+              </button>
+            </div>
+          )}
+
+          {wingetHealth && (
+            <div className="rounded-xl border border-slate-300 bg-white p-4 dark:border-white/10 dark:bg-black/20">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthTitle')}</p>
+                <span className={clsx(
+                  "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider",
+                  wingetHealth.installed && wingetHealth.sourcesHealthy
+                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                    : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                )}>
+                  {wingetHealth.installed && wingetHealth.sourcesHealthy ? t('wingetHealthOk') : t('wingetHealthNeedsAttention')}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthInstalled')}</p>
+                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.installed ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
+                </div>
+                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthVersion')}</p>
+                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.version || t('unknown')}</p>
+                </div>
+                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthSources')}</p>
+                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.sourcesHealthy ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
+                </div>
+                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthNetwork')}</p>
+                  <p className="text-slate-800 dark:text-sky-200">{isOnline ? t('networkOnline') : t('networkOffline')}</p>
+                </div>
+              </div>
+              {wingetHealth.sourceSummary && (
+                <p className="mt-2 text-[11px] font-medium text-slate-800 dark:text-sky-200 break-words">
+                  {t('wingetHealthSourcesDetected').replace('{sources}', wingetHealth.sourceSummary)}
+                </p>
+              )}
+              {wingetHealth.error && (
+                <p className="mt-1 text-[11px] font-medium text-amber-800 dark:text-amber-300 break-words">
+                  {formatCompactText(wingetHealth.error)}
+                </p>
+              )}
+            </div>
+          )}
+
+          {ignoredHiddenCount > 0 && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
+              <p>{t('ignoreHiddenCount').replace('{count}', String(ignoredHiddenCount))}</p>
+              <p className="mt-1 text-xs">{t('ignoreActiveRules').replace('{count}', String(activeIgnoredRulesCount))}</p>
             </div>
           )}
 
@@ -1104,6 +1433,10 @@ export default function App() {
                     update={update}
                     isSelected={selectedIds.has(update.id)}
                     onToggle={() => toggleSelect(update.id)}
+                    releaseNotesUrl={releaseNotesUrlById[update.id]}
+                    isLoadingReleaseNotes={Boolean(releaseNotesLoadingById[update.id])}
+                    onOpenReleaseNotes={() => { void openReleaseNotesForUpdate(update); }}
+                    onIgnoreFor7Days={() => { void ignoreUpdateForSevenDays(update); }}
                   />
                 ))}
               </div>
@@ -1120,6 +1453,8 @@ export default function App() {
             setSelectedIds(new Set());
             setShowSummary(false);
             setIsWingetMissing(false);
+            setIgnoredUntilById({});
+            setIgnoredHiddenCount(0);
           }}
         />
       )}
@@ -1163,6 +1498,25 @@ export default function App() {
                   </div>
                 );
               })()}
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/40 dark:bg-emerald-900/20">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">{t('summaryCountUpdated')}</p>
+                  <p className="text-xl font-bold text-emerald-800 dark:text-emerald-200">{summaryUpdatedCount}</p>
+                </div>
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 dark:border-blue-900/40 dark:bg-blue-900/20">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">{t('summaryCountReboot')}</p>
+                  <p className="text-xl font-bold text-blue-800 dark:text-blue-200">{summaryRebootCount}</p>
+                </div>
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/40 dark:bg-amber-900/20">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">{t('summaryCountNoChange')}</p>
+                  <p className="text-xl font-bold text-amber-800 dark:text-amber-200">{summaryNoChangeCount}</p>
+                </div>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-900/20">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-rose-700 dark:text-rose-300">{t('summaryCountActionNeeded')}</p>
+                  <p className="text-xl font-bold text-rose-800 dark:text-rose-200">{summaryActionNeededCount}</p>
+                </div>
+              </div>
 
               {restoreVerificationSummary && (
                 <div className={clsx(
@@ -1403,6 +1757,59 @@ export default function App() {
                   />
                 </div>
               </div>
+              <p className="text-[11px] font-semibold text-slate-700 dark:text-sky-100">
+                {t('estimatedTimeRemaining')}{' '}
+                {estimatedRemainingSeconds === null
+                  ? t('unknown')
+                  : estimatedRemainingSeconds < 60
+                    ? t('lessThanOneMinute')
+                    : t('aboutMinutes').replace('{minutes}', String(Math.max(1, Math.round(estimatedRemainingSeconds / 60))))}
+              </p>
+              <p className="text-[11px] font-medium text-slate-700 dark:text-sky-100">
+                {t('installSlowNetworkHint')}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {downloadGuideState && (
+        <div className="fixed inset-0 z-[175] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-slate-300 bg-white p-6 shadow-2xl dark:border-white/10 dark:bg-slate-900">
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">{t('downloadGuideTitle')}</h3>
+            <p className="mt-2 text-sm text-slate-800 dark:text-sky-100">
+              {downloadGuideState.isZip ? t('downloadGuideZipIntro') : t('downloadGuideExeIntro')}
+            </p>
+
+            <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-slate-800 dark:text-sky-100">
+              <li>{t('downloadGuideStepCloseCurrent')}</li>
+              {downloadGuideState.isZip ? (
+                <>
+                  <li>{t('downloadGuideStepExtract')}</li>
+                  <li>{t('downloadGuideStepRunExtracted')}</li>
+                </>
+              ) : (
+                <li>{t('downloadGuideStepRunInstaller')}</li>
+              )}
+            </ol>
+
+            <p className="mt-3 break-all rounded border border-slate-300 bg-slate-100 p-2 text-[11px] font-mono text-slate-900 dark:border-white/10 dark:bg-black/20 dark:text-sky-100">
+              {downloadGuideState.filePath}
+            </p>
+
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              <button
+                onClick={() => window.ipcRenderer.invoke('system:show-item-in-folder', downloadGuideState.filePath)}
+                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-sky-100 dark:hover:bg-white/10"
+              >
+                {t('downloadGuideOpenFolder')}
+              </button>
+              <button
+                onClick={() => setDownloadGuideState(null)}
+                className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-bold text-white hover:bg-blue-700"
+              >
+                {t('downloadGuideClose')}
+              </button>
             </div>
           </div>
         </div>

@@ -14,6 +14,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
     const [loading, setLoading] = useState(true);
     const [showClearConfirm, setShowClearConfirm] = useState(false);
     const [filter, setFilter] = useState<'all' | 'success' | 'issues' | 'failed' | 'inUse' | 'inapplicable' | 'reboot' | 'security'>('all');
+    const [searchQuery, setSearchQuery] = useState('');
 
     useEffect(() => {
         const loadHistory = async () => {
@@ -76,16 +77,38 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
     }
 
     // History check removed to allow header rendering
+    const normalizedQuery = searchQuery
+        .trim()
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+
     const filteredHistory = history.filter((item) => {
         if (filter === 'all') return true;
         if (filter === 'success') return item.status === 'success';
-        if (filter === 'issues') return item.status === 'failed' || item.status === 'inapplicable' || item.status === 'in-use' || item.status === 'skipped';
+        if (filter === 'issues') return item.status === 'failed' || item.status === 'inapplicable' || item.status === 'in-use' || item.status === 'skipped' || item.status === 'security-error';
         if (filter === 'failed') return item.status === 'failed';
         if (filter === 'inUse') return item.status === 'in-use';
         if (filter === 'inapplicable') return item.status === 'inapplicable';
         if (filter === 'reboot') return item.status === 'reboot';
         if (filter === 'security') return item.status === 'security-error';
         return true;
+    }).filter((item) => {
+        if (!normalizedQuery) return true;
+        const searchable = [
+            item.appName,
+            item.id,
+            item.status,
+            item.version,
+            item.previousVersion || '',
+            item.details || ''
+        ]
+            .join(' ')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+
+        return searchable.includes(normalizedQuery);
     });
 
     return (
@@ -136,30 +159,39 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
             </header>
 
             {history.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                    {[
-                        { id: 'all', label: t('historyFilterAll') },
-                        { id: 'success', label: t('historyFilterSuccess') },
-                        { id: 'issues', label: t('historyFilterIssues') },
-                        { id: 'failed', label: t('historyFilterFailed') },
-                        { id: 'inUse', label: t('historyFilterInUse') },
-                        { id: 'inapplicable', label: t('historyFilterInapplicable') },
-                        { id: 'reboot', label: t('historyFilterReboot') },
-                        { id: 'security', label: t('historyFilterSecurity') }
-                    ].map((option) => (
-                        <button
-                            key={option.id}
-                            onClick={() => setFilter(option.id as typeof filter)}
-                            className={clsx(
-                                "rounded-full border px-3 py-1 text-xs font-bold transition-colors",
-                                filter === option.id
-                                    ? "border-blue-500 bg-blue-600 text-white"
-                                    : "border-slate-300 bg-white text-slate-900 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-sky-200 dark:hover:bg-white/10"
-                            )}
-                        >
-                            {option.label}
-                        </button>
-                    ))}
+                <div className="space-y-3">
+                    <input
+                        value={searchQuery}
+                        onChange={(event) => setSearchQuery(event.target.value)}
+                        placeholder={t('historySearchPlaceholder')}
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none dark:border-white/10 dark:bg-white/5 dark:text-sky-100"
+                    />
+
+                    <div className="flex flex-wrap gap-2">
+                        {[
+                            { id: 'all', label: t('historyFilterAll') },
+                            { id: 'success', label: t('historyFilterSuccess') },
+                            { id: 'issues', label: t('historyFilterIssues') },
+                            { id: 'failed', label: t('historyFilterFailed') },
+                            { id: 'inUse', label: t('historyFilterInUse') },
+                            { id: 'inapplicable', label: t('historyFilterInapplicable') },
+                            { id: 'reboot', label: t('historyFilterReboot') },
+                            { id: 'security', label: t('historyFilterSecurity') }
+                        ].map((option) => (
+                            <button
+                                key={option.id}
+                                onClick={() => setFilter(option.id as typeof filter)}
+                                className={clsx(
+                                    "rounded-full border px-3 py-1 text-xs font-bold transition-colors",
+                                    filter === option.id
+                                        ? "border-blue-500 bg-blue-600 text-white"
+                                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-sky-200 dark:hover:bg-white/10"
+                                )}
+                            >
+                                {option.label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             )}
 
@@ -172,7 +204,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
             ) : filteredHistory.length === 0 ? (
                 <div className="flex h-64 flex-col items-center justify-center space-y-2 text-slate-800 dark:text-sky-100">
                     <AlertCircle className="h-10 w-10" />
-                    <p className="text-sm font-medium">{t('historyEmptySmall')}</p>
+                    <p className="text-sm font-medium">{normalizedQuery ? t('historySearchNoMatch') : t('historyEmptySmall')}</p>
                 </div>
             ) : (
                 <div className="relative space-y-10 before:absolute before:inset-0 before:ml-5 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent dark:before:via-white/5">

@@ -7,6 +7,8 @@ const listenerMap = new Map<string, Map<RendererListener, RendererListener>>();
 const allowedInvokeChannels = new Set([
     'winget:check-updates',
     'winget:install-update',
+    'winget:get-release-notes-url',
+    'winget:get-health',
     'system:create-restore-point',
     'system:verify-restore-point',
     'system:open-logs',
@@ -17,15 +19,19 @@ const allowedInvokeChannels = new Set([
     'system:set-operation-active',
     'system:open-url',
     'system:show-item-in-folder',
+    'system:open-path',
     'system:open-system-restore',
     'system:open-services-console',
     'system:check-app-update',
     'system:download-app-update',
     'system:run-preflight',
     'system:export-diagnostics',
+    'system:check-data-folder',
     'history:get',
     'history:add',
     'history:clear',
+    'ignore:get-active',
+    'ignore:add-temporary',
     'system:get-userdata-path'
 ]);
 const allowedOnChannels = new Set([

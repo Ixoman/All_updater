@@ -15,25 +15,31 @@ process.env.VITE_PUBLIC = app.isPackaged ? process.env.DIST : path.join(process.
 if (app.isPackaged) {
     const portableBaseDir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(app.getPath('exe'));
     const portableDataPath = path.join(portableBaseDir, 'data');
-    let userDataPath = portableDataPath;
+    let userDataPath: string | null = null;
 
     try {
         fs.mkdirSync(portableDataPath, { recursive: true });
         const probePath = path.join(portableDataPath, '.all-updater-write-test');
         fs.writeFileSync(probePath, 'ok', 'utf8');
         fs.unlinkSync(probePath);
+        userDataPath = portableDataPath;
     } catch (error) {
         console.warn('[Main] Portable data folder is not writable. Falling back to roaming appData.', error);
         try {
             const fallbackPath = path.join(app.getPath('appData'), 'All Updater', 'data');
             fs.mkdirSync(fallbackPath, { recursive: true });
+            const fallbackProbePath = path.join(fallbackPath, '.all-updater-write-test');
+            fs.writeFileSync(fallbackProbePath, 'ok', 'utf8');
+            fs.unlinkSync(fallbackProbePath);
             userDataPath = fallbackPath;
         } catch (fallbackError) {
             console.warn('[Main] Roaming appData fallback is not writable. Keeping default userData path.', fallbackError);
         }
     }
 
-    app.setPath('userData', userDataPath);
+    if (userDataPath) {
+        app.setPath('userData', userDataPath);
+    }
 }
 
 // --- Refuerzo de Administrador ---

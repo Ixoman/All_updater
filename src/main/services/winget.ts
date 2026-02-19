@@ -1,5 +1,5 @@
 import { execa } from 'execa';
-import type { AppUpdate } from '../../shared/types';
+import type { AppUpdate, WingetHealthStatus } from '../../shared/types';
 import type { HistoryService } from './history';
 import { SystemService } from './system';
 
@@ -130,6 +130,110 @@ export class WingetService {
         );
 
         return progressLikeLines.length > 0 && meaningfulTextLines.length === 0;
+    }
+
+    private isLikelySourceName(value: string): boolean {
+        const trimmed = value.trim();
+        if (!trimmed) return false;
+        if (trimmed.length < 2 || trimmed.length > 64) return false;
+        if (/\s|\|/.test(trimmed)) return false;
+        if (/^https?:\/\//i.test(trimmed)) return false;
+        return /^[a-z0-9][a-z0-9._-]*$/i.test(trimmed);
+    }
+
+    private looksLikeSourceArgument(value: string): boolean {
+        const trimmed = value.trim();
+        if (!trimmed) return false;
+        if (/^(https?:\/\/|ms-windows-store:\/\/)/i.test(trimmed)) return true;
+        if (/^[a-z]+:\/\/[^\s]+$/i.test(trimmed)) return true;
+        return false;
+    }
+
+    private extractSourceNamesFromListOutput(output: string): string[] {
+        if (!output.trim()) return [];
+        // eslint-disable-next-line no-control-regex
+        const cleaned = output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '\n');
+        const lines = cleaned
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+        const unique = new Set<string>();
+
+        for (const line of lines) {
+            const normalized = this.normalizeText(line);
+            if (
+                normalized.startsWith('name ') ||
+                normalized.startsWith('nombre ') ||
+                normalized.startsWith('nom ') ||
+                normalized.includes('argument') ||
+                normalized.includes('explicito') ||
+                normalized.includes('explicit')
+            ) {
+                continue;
+            }
+            if (/^-+$/.test(line) || /^-+\s+-+/.test(line)) continue;
+
+            const match = line.match(/^([a-z0-9][a-z0-9._-]{1,})\s{2,}(\S+)(?:\s{2,}\S+)?$/i);
+            if (!match) continue;
+
+            const sourceName = match[1].trim();
+            const sourceArgument = match[2].trim();
+            if (!this.isLikelySourceName(sourceName)) continue;
+            if (!this.looksLikeSourceArgument(sourceArgument)) continue;
+            unique.add(sourceName);
+        }
+
+        return Array.from(unique);
+    }
+
+    private collectSourceNamesFromJson(payload: unknown): string[] {
+        const unique = new Set<string>();
+        const stack: unknown[] = [payload];
+
+        while (stack.length > 0) {
+            const current = stack.pop();
+            if (!current || typeof current !== 'object') continue;
+            if (Array.isArray(current)) {
+                for (const item of current) stack.push(item);
+                continue;
+            }
+
+            const node = current as Record<string, unknown>;
+            const nameCandidates = [node.Name, node.name, node.SourceName, node.sourceName];
+            for (const candidate of nameCandidates) {
+                if (typeof candidate !== 'string') continue;
+                const sourceName = candidate.trim();
+                if (this.isLikelySourceName(sourceName)) {
+                    unique.add(sourceName);
+                }
+            }
+
+            for (const value of Object.values(node)) {
+                if (value && typeof value === 'object') {
+                    stack.push(value);
+                }
+            }
+        }
+
+        return Array.from(unique);
+    }
+
+    private parseWingetSourceListJsonOutput(rawOutput: string): string[] | null {
+        if (!rawOutput?.trim()) return null;
+        const firstBrace = rawOutput.indexOf('{');
+        const firstBracket = rawOutput.indexOf('[');
+        const startCandidates = [firstBrace, firstBracket].filter(index => index >= 0);
+        if (startCandidates.length === 0) return null;
+
+        const jsonStart = Math.min(...startCandidates);
+        const jsonText = rawOutput.slice(jsonStart);
+
+        try {
+            const payload = JSON.parse(jsonText) as unknown;
+            return this.collectSourceNamesFromJson(payload);
+        } catch {
+            return null;
+        }
     }
 
     private hasPotentialPackageLikeLine(lines: string[]): boolean {
@@ -300,6 +404,136 @@ export class WingetService {
             await execa('winget', ['source', 'update'], { timeout: 60000 });
         } catch (e) {
             console.error('[WingetService] Failed to heal sources:', e);
+        }
+    }
+
+    private normalizeText(value: string): string {
+        return value
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+    }
+
+    private extractFirstHttpUrl(value: string): string | null {
+        const match = value.match(/https?:\/\/[^\s<>"'`]+/i);
+        if (!match) return null;
+        return match[0].replace(/[),.;]+$/, '');
+    }
+
+    private findReleaseNotesUrlInJsonNode(node: unknown, allowLooseStringMatch = false): string | null {
+        if (node == null) return null;
+        if (typeof node === 'string') {
+            return allowLooseStringMatch ? this.extractFirstHttpUrl(node) : null;
+        }
+        if (Array.isArray(node)) {
+            for (const child of node) {
+                const found = this.findReleaseNotesUrlInJsonNode(child, allowLooseStringMatch);
+                if (found) return found;
+            }
+            return null;
+        }
+        if (typeof node !== 'object') return null;
+
+        const record = node as Record<string, unknown>;
+
+        for (const [key, value] of Object.entries(record)) {
+            const normalizedKey = this.normalizeText(key).replace(/\s+/g, '');
+            const isReleaseNotesUrlKey =
+                /releasenotesurl|releasenoteurl|urlnotasdeversion|notasdeversionurl/.test(normalizedKey);
+            const isReleaseNotesTextKey =
+                /releasenotes|notasdeversion/.test(normalizedKey);
+
+            if ((isReleaseNotesUrlKey || isReleaseNotesTextKey) && typeof value === 'string') {
+                const found = this.extractFirstHttpUrl(value);
+                if (found) return found;
+            }
+
+            if (isReleaseNotesUrlKey || isReleaseNotesTextKey) {
+                const nested = this.findReleaseNotesUrlInJsonNode(value, true);
+                if (nested) return nested;
+                continue;
+            }
+
+            if (value && typeof value === 'object') {
+                const nested = this.findReleaseNotesUrlInJsonNode(value, false);
+                if (nested) return nested;
+            }
+        }
+
+        return null;
+    }
+
+    private parseReleaseNotesUrlFromJsonOutput(rawOutput: string): string | null {
+        if (!rawOutput?.trim()) return null;
+        const firstBrace = rawOutput.indexOf('{');
+        const firstBracket = rawOutput.indexOf('[');
+        const candidates = [firstBrace, firstBracket].filter(index => index >= 0);
+        if (candidates.length === 0) return null;
+
+        const jsonStart = Math.min(...candidates);
+        const jsonText = rawOutput.slice(jsonStart);
+
+        try {
+            const payload = JSON.parse(jsonText) as unknown;
+            return this.findReleaseNotesUrlInJsonNode(payload);
+        } catch {
+            return null;
+        }
+    }
+
+    private parseReleaseNotesUrlFromTextOutput(output: string): string | null {
+        if (!output?.trim()) return null;
+        // eslint-disable-next-line no-control-regex
+        const cleaned = output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '\n');
+        const lines = cleaned.split('\n').map(line => line.trim()).filter(Boolean);
+        const markerRegex = /(release\s*notes?\s*url|url\s*de\s*notas?\s*de\s*version|notas?\s*de\s*version\s*url)/i;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const normalizedLine = this.normalizeText(line);
+            if (!markerRegex.test(normalizedLine)) continue;
+
+            const direct = this.extractFirstHttpUrl(line);
+            if (direct) return direct;
+
+            for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
+                const neighborUrl = this.extractFirstHttpUrl(lines[j]);
+                if (neighborUrl) return neighborUrl;
+            }
+        }
+
+        return null;
+    }
+
+    async getReleaseNotesUrl(id: string): Promise<string | null> {
+        const baseArgs = [
+            'show',
+            '--id', id,
+            '--exact',
+            '--accept-source-agreements',
+            '--accept-package-agreements'
+        ];
+
+        try {
+            const jsonResult = await this.runWingetCommandWithFallback(
+                [...baseArgs, '--output', 'json'],
+                { timeout: 45000, includeAll: false }
+            );
+            const jsonUrl = this.parseReleaseNotesUrlFromJsonOutput(jsonResult.stdout);
+            if (jsonUrl) return jsonUrl;
+        } catch (error) {
+            this.debug('[WingetService] Could not parse release notes URL from JSON output:', error);
+        }
+
+        try {
+            const textResult = await this.runWingetCommandWithFallback(baseArgs, {
+                timeout: 45000,
+                includeAll: true
+            });
+            return this.parseReleaseNotesUrlFromTextOutput(textResult.all);
+        } catch (error) {
+            this.debug('[WingetService] Could not read release notes URL from text output:', error);
+            return null;
         }
     }
 
@@ -524,6 +758,70 @@ export class WingetService {
         }
     }
 
+    async getHealth(): Promise<WingetHealthStatus> {
+        try {
+            const versionResult = await execa('winget', ['--version'], {
+                reject: false,
+                timeout: 15000
+            });
+            const version = (versionResult.stdout || '').trim();
+            if (versionResult.exitCode !== 0 || !version) {
+                const details = `${versionResult.stdout || ''}\n${versionResult.stderr || ''}`.trim() || `exitCode=${versionResult.exitCode ?? 'null'}`;
+                return {
+                    installed: false,
+                    sourcesHealthy: false,
+                    error: details
+                };
+            }
+
+            let sourceOutput = '';
+            let sourceNames: string[] = [];
+
+            const jsonSourceResult = await this.runWingetCommandWithFallback(
+                ['source', 'list', '--output', 'json'],
+                { timeout: 25000, includeAll: true }
+            );
+            sourceOutput = jsonSourceResult.all.trim();
+            const sourceNamesFromJson = this.parseWingetSourceListJsonOutput(jsonSourceResult.stdout);
+            if (sourceNamesFromJson && sourceNamesFromJson.length > 0) {
+                sourceNames = sourceNamesFromJson;
+            }
+
+            if (sourceNames.length === 0) {
+                const textSourceResult = await this.runWingetCommandWithFallback(
+                    ['source', 'list'],
+                    { timeout: 25000, includeAll: true }
+                );
+                sourceOutput = textSourceResult.all.trim();
+                sourceNames = this.extractSourceNamesFromListOutput(sourceOutput);
+            }
+
+            const normalized = this.normalizeText(sourceOutput);
+            const normalizedSourceNames = sourceNames.map((name) => this.normalizeText(name));
+            const hasKnownSource =
+                normalizedSourceNames.includes('winget') ||
+                normalizedSourceNames.includes('msstore') ||
+                /\bwinget\b|\bmsstore\b/.test(normalized);
+            const hasSourceErrors =
+                /0x8a1500|source.+(failed|error|invalid|broken)|msstore.+(failed|error)|no sources?|no hay fuentes?|fuentes?.+(error|fall)/.test(normalized);
+            const sourcesHealthy = hasKnownSource && !hasSourceErrors;
+            const sourceSummary = sourceNames.join(', ');
+
+            return {
+                installed: true,
+                version,
+                sourcesHealthy,
+                sourceSummary: sourceSummary || undefined
+            };
+        } catch (error) {
+            return {
+                installed: false,
+                sourcesHealthy: false,
+                error: String(error)
+            };
+        }
+    }
+
     private async tryGetUpdatesFromJson(): Promise<AppUpdate[] | null> {
         const jsonArgsCandidates = [
             ['list', '--upgrade-available', '--include-unknown', '--accept-source-agreements', '--output', 'json'],
@@ -672,7 +970,8 @@ export class WingetService {
     ): boolean {
         const latestForVersion = this.getLatestHistoryEntryForVersion(id, availableVersion, history);
         if (!latestForVersion) return false;
-        if (!['failed', 'inapplicable', 'in-use', 'security-error'].includes(latestForVersion.status)) return false;
+        // Keep suppression narrow to avoid hiding valid retries for actionable failures.
+        if (!['inapplicable'].includes(latestForVersion.status)) return false;
 
         const cutoff = Date.now() - this.unknownVersionCooldownMs;
         const timestamp = Date.parse(latestForVersion.date);
@@ -801,6 +1100,15 @@ export class WingetService {
         const parsedWithoutHeader = this.parseDataLinesWithRegex(lines);
         if (parsedWithoutHeader.length > 0) {
             return parsedWithoutHeader;
+        }
+
+        const candidateLines = lines
+            .map(line => line.trim())
+            .filter(Boolean)
+            .filter(line => !this.isIgnorableOutputLine(line) && !this.isSeparatorLine(line));
+        const hasParsableRows = candidateLines.some(line => this.parseDataLineByTokens(line) !== null);
+        if (!hasParsableRows) {
+            return [];
         }
 
         if (this.isOutputEffectivelyEmptyOrNoise(output)) {

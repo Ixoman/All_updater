@@ -1,6 +1,8 @@
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
-import { shell } from 'electron';
+import { app, shell } from 'electron';
+import type { DataFolderStatus } from '../../shared/types';
 
 export interface SystemInfo {
     platform: string;
@@ -44,6 +46,24 @@ export class SystemService {
         const error = await shell.openPath(target);
         if (error) {
             throw new Error(error);
+        }
+    }
+
+    checkUserDataWritable(): DataFolderStatus {
+        const userDataPath = app.getPath('userData');
+        const probePath = path.join(userDataPath, '.all-updater-write-test');
+
+        try {
+            fs.mkdirSync(userDataPath, { recursive: true });
+            fs.writeFileSync(probePath, 'ok', 'utf8');
+            fs.unlinkSync(probePath);
+            return { path: userDataPath, writable: true };
+        } catch (error) {
+            return {
+                path: userDataPath,
+                writable: false,
+                details: String(error)
+            };
         }
     }
 }

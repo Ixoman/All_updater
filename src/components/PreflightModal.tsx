@@ -32,6 +32,7 @@ export const PreflightModal: React.FC<PreflightModalProps> = ({
     const checks: CheckKey[] = ['admin', 'winget', 'vssService', 'taskScheduler', 'restoreQuery'];
     const canContinue = result?.overall !== 'error';
     const continueRef = useRef<HTMLButtonElement>(null);
+    const riskLevel = result?.overall === 'ok' ? 'low' : result?.overall === 'warning' ? 'medium' : 'high';
     const checkLabelKeys: Record<CheckKey, Parameters<typeof t>[0]> = {
         admin: 'preflightCheckAdmin',
         winget: 'preflightCheckWinget',
@@ -151,6 +152,16 @@ export const PreflightModal: React.FC<PreflightModalProps> = ({
                     </div>
 
                     <div className="p-6 space-y-4">
+                        <div className={(
+                            riskLevel === 'low'
+                                ? 'rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300'
+                                : riskLevel === 'medium'
+                                    ? 'rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300'
+                                    : 'rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs font-bold text-red-900 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300'
+                        )}>
+                            {t('preflightRiskLabel')}: {riskLevel === 'low' ? t('preflightRiskLow') : riskLevel === 'medium' ? t('preflightRiskMedium') : t('preflightRiskHigh')}
+                        </div>
+
                         <div className="rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-800 dark:border-white/10 dark:bg-white/5 dark:text-sky-100">
                             {result.overall === 'ok' && t('preflightOverallOk')}
                             {result.overall === 'warning' && t('preflightOverallWarning')}

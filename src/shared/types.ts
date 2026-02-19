@@ -106,3 +106,24 @@ export interface DiagnosticsExportResult {
     filePath?: string;
     error?: string;
 }
+
+export interface IgnoreRule {
+    id: string;
+    availableVersion?: string;
+    until: string;
+    createdAt: string;
+}
+
+export interface WingetHealthStatus {
+    installed: boolean;
+    version?: string;
+    sourcesHealthy: boolean;
+    sourceSummary?: string;
+    error?: string;
+}
+
+export interface DataFolderStatus {
+    path: string;
+    writable: boolean;
+    details?: string;
+}
