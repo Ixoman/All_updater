@@ -24,6 +24,10 @@ Esta versión refuerza robustez operativa y claridad de estado, manteniendo la f
 - Lint limpio.
 - TypeScript limpio (`app` y `electron`).
 
+### Nota temporal (firma)
+- Esta release incluye artefacto portable sin firma digital mientras se configura el certificado de firma.
+- Es una medida temporal. En próximas versiones se retomará la distribución firmada.
+
 ## EN
 This release strengthens operational robustness and status clarity while preserving the non-invasive, portable philosophy.
 
@@ -47,3 +51,7 @@ This release strengthens operational robustness and status clarity while preserv
 ### Quality
 - Clean lint.
 - Clean TypeScript checks (`app` and `electron`).
+
+### Temporary note (signing)
+- This release includes a portable artifact without digital signature while signing certificate setup is pending.
+- This is temporary. Signed distribution will resume in upcoming versions.
