@@ -21,6 +21,8 @@ Y opcional/recomendado:
 - `npm run release:portable:signed`: build firmado + verificación de firma
 - `npm run build:local`: build portable **sin firma** (solo pruebas locales)
 - `npm run release:local`: alias local para build portable **sin firma** (no publicar)
+- `npm run release:portable:unsigned`: build portable unsigned + ZIP versionado para distribución temporal
+- `npm run release:portable:unsigned:github`: build unsigned + ZIP + create/update del release en GitHub
 - `npm run hooks:install`: activa hooks de git del repo (`.githooks`)
 
 ## 3) Ejemplo rápido (PowerShell)
@@ -46,6 +48,33 @@ El hook `pre-push` bloqueará push a:
 - `refs/tags/v*`
 
 si no detecta un artefacto firmado válido.
+
+## 3.2) Flujo temporal sin firma (solo mientras no haya certificado)
+
+Si todavía no tienes certificado de firma, el proyecto deja un flujo temporal explícito:
+
+```powershell
+npm run release:portable:unsigned
+```
+
+Esto:
+
+- genera el portable unsigned
+- crea `release/All-Updater-vX.Y.Z-portable.zip`
+
+Y si además quieres publicar directo en GitHub:
+
+```powershell
+npm run release:portable:unsigned:github
+```
+
+Esto:
+
+- genera el portable unsigned
+- empaqueta el ZIP versionado
+- crea o actualiza el release `vX.Y.Z` en GitHub usando `RELEASE_NOTES_vX.Y.Z.md`
+
+Este flujo es temporal y debe reemplazarse nuevamente por el release firmado cuando el certificado esté disponible.
 
 ## 4) Paso Defender (reputación SmartScreen)
 

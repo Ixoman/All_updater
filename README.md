@@ -5,6 +5,8 @@
 - SmartScreen + code signing guide: `SIGNING_SMARTSCREEN.md`
 - Install git hooks once: `npm run hooks:install`
 - Local-only unsigned portable build: `npm run build:local`
+- Temporary unsigned portable release package: `npm run release:portable:unsigned`
+- Temporary unsigned GitHub release publish: `npm run release:portable:unsigned:github`
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
