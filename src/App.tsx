@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Layout } from './components/Layout';
 import { UpdateCard } from './components/UpdateCard';
 import { RestoreModal } from './components/RestoreModal';
@@ -7,23 +7,29 @@ import { RestoreVerificationAlertModal } from './components/RestoreVerificationA
 import { PreflightModal } from './components/PreflightModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { ConflictModal } from './components/ConflictModal';
+import { DownloadGuideModal } from './components/DownloadGuideModal';
 import { HistoryView } from './components/HistoryView.tsx';
+import { InstallStateOverlay } from './components/InstallStateOverlay';
+import { SummaryModal } from './components/SummaryModal';
 import type {
   AppUpdate,
-  AppVersionCheckResult,
   DataFolderStatus,
   HistoryItem,
   IgnoreRule,
-  PreflightResult,
-  RestoreFailureReason,
-  RestorePointResult,
-  RestorePointVerificationResult,
   WingetHealthStatus
 } from './shared/types';
-import { RefreshCw, CheckCircle, Coffee, ArrowDownToLine, CheckSquare, Square, AlertCircle, XCircle, AlertTriangle, FileText, FolderOpen, Wifi, WifiOff } from 'lucide-react';
+import { RefreshCw, CheckCircle, Coffee, ArrowDownToLine, CheckSquare, Square, XCircle, FileText, FolderOpen, Wifi, WifiOff } from 'lucide-react';
 import { ToastContainer, type ToastType } from './components/Toast';
 import { useLanguage } from './context/LanguageContext';
+import { useAppUpdate } from './hooks/useAppUpdate';
+import { useBatchInstall } from './hooks/useBatchInstall';
+import { useReleaseNotes } from './hooks/useReleaseNotes';
+import { useUpdateFlow } from './hooks/useUpdateFlow';
 import { clsx } from 'clsx';
+import {
+  buildIgnoreRuleKey,
+  isUpdateIgnoredByRule,
+} from './utils/app-helpers';
 
 interface ToastItem {
   id: string;
@@ -31,64 +37,7 @@ interface ToastItem {
   type: ToastType;
 }
 
-interface RestoreVerificationSummaryState {
-  status: 'confirmed' | 'missing' | 'unverified';
-  message: string;
-  details?: string;
-}
-
 type ThemeMode = 'dark' | 'light' | 'system';
-type AppProgressMode = 'real' | 'estimated';
-let hasRunInitialAppVersionCheck = false;
-
-const parsePercentFromWingetLog = (logLine: string): number | null => {
-  const matches = Array.from(logLine.matchAll(/(^|[^0-9])([0-9]{1,3})%(?![0-9])/g));
-  if (matches.length === 0) return null;
-  const raw = Number(matches[matches.length - 1][2]);
-  if (!Number.isFinite(raw)) return null;
-  return Math.max(0, Math.min(100, raw));
-};
-
-const normalizeWingetLog = (value: string): string => (
-  value
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-);
-
-const parseEstimatedPercentFromWingetLog = (logLine: string): number | null => {
-  const normalized = normalizeWingetLog(logLine);
-  const phaseRules: Array<{ percent: number, regex: RegExp }> = [
-    { percent: 12, regex: /\bstarting|iniciando|initializing|inicializando\b/ },
-    { percent: 28, regex: /\bdownloading|download|descargando|descarga|transferring|transfer\b/ },
-    { percent: 45, regex: /\bextract|unpack|decompress|descomprim|expandiendo\b/ },
-    { percent: 70, regex: /\binstalling|install|instaland|aplicando|applying|executing|ejecutando\b/ },
-    { percent: 84, regex: /\bverifying|verify|verificando|verificar|hash|checksum\b/ },
-    { percent: 95, regex: /\bfinalizing|finalizando|completing|completion|completado|completed|done|hecho|terminado|installed successfully|instalado correctamente\b/ }
-  ];
-
-  for (const rule of phaseRules) {
-    if (rule.regex.test(normalized)) {
-      return rule.percent;
-    }
-  }
-
-  return null;
-};
-
-const normalizeIgnoreVersion = (value?: string): string => (value || '').trim();
-
-const buildIgnoreRuleKey = (id: string, availableVersion?: string): string => {
-  const normalizedVersion = normalizeIgnoreVersion(availableVersion);
-  return normalizedVersion ? `${id}@@${normalizedVersion}` : `${id}@@*`;
-};
-
-const isUpdateIgnoredByRule = (update: AppUpdate, rule: IgnoreRule): boolean => {
-  if (rule.id !== update.id) return false;
-  const normalizedRuleVersion = normalizeIgnoreVersion(rule.availableVersion);
-  if (!normalizedRuleVersion) return true;
-  return normalizedRuleVersion === normalizeIgnoreVersion(update.available);
-};
 
 export default function App() {
   const { t, language } = useLanguage();
@@ -97,52 +46,24 @@ export default function App() {
   const [hasChecked, setHasChecked] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  const [showRestoreModal, setShowRestoreModal] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [isInstalling, setIsInstalling] = useState(false);
-  const [isCreatingRestore, setIsCreatingRestore] = useState(false);
-  const [conflictState, setConflictState] = useState<{ appName: string, onRetry: () => void, onSkip: () => void } | null>(null);
-  const [restoreDecisionState, setRestoreDecisionState] = useState<{ message: string, details?: string, onContinue: () => void, onCancel: () => void } | null>(null);
-  const [restoreVerificationAlert, setRestoreVerificationAlert] = useState<{ message: string, details?: string } | null>(null);
-  const [currentInstallingApp, setCurrentInstallingApp] = useState<string | null>(null);
-  const [currentLogLine, setCurrentLogLine] = useState<string | null>(null);
-  const [currentAppProgress, setCurrentAppProgress] = useState<number | null>(null);
-  const [currentAppProgressMode, setCurrentAppProgressMode] = useState<AppProgressMode | null>(null);
-  const [installProgress, setInstallProgress] = useState<{ current: number, total: number } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history'>('dashboard');
-  const [showSummary, setShowSummary] = useState(false);
-  const [batchResults, setBatchResults] = useState<HistoryItem[]>([]);
   const [systemInfo, setSystemInfo] = useState<{ arch: string, locale: string } | null>(null);
   const [isWingetMissing, setIsWingetMissing] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>('system');
   const [darkMode, setDarkMode] = useState(true);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [appUpdateInfo, setAppUpdateInfo] = useState<AppVersionCheckResult | null>(null);
-  const [checkingAppVersion, setCheckingAppVersion] = useState(false);
-  const [downloadingAppUpdate, setDownloadingAppUpdate] = useState(false);
-  const [appUpdateProgress, setAppUpdateProgress] = useState<number | null>(null);
-  const [lastDownloadedUpdatePath, setLastDownloadedUpdatePath] = useState<string | null>(null);
-  const [downloadGuideState, setDownloadGuideState] = useState<{ filePath: string, isZip: boolean } | null>(null);
-  const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
-  const [runningPreflight, setRunningPreflight] = useState(false);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
-  const [isOnline, setIsOnline] = useState(typeof navigator === 'undefined' ? true : navigator.onLine);
-  const [restoreVerificationSummary, setRestoreVerificationSummary] = useState<RestoreVerificationSummaryState | null>(null);
-  const [releaseNotesUrlById, setReleaseNotesUrlById] = useState<Partial<Record<string, string | null>>>({});
-  const [releaseNotesLoadingById, setReleaseNotesLoadingById] = useState<Partial<Record<string, boolean>>>({});
   const [ignoredUntilById, setIgnoredUntilById] = useState<Partial<Record<string, string>>>({});
   const [ignoredHiddenCount, setIgnoredHiddenCount] = useState(0);
   const [wingetHealth, setWingetHealth] = useState<WingetHealthStatus | null>(null);
   const [checkingWingetHealth, setCheckingWingetHealth] = useState(false);
   const [dataFolderStatus, setDataFolderStatus] = useState<DataFolderStatus | null>(null);
-  const [estimatedRemainingSeconds, setEstimatedRemainingSeconds] = useState<number | null>(null);
   const initializedRef = useRef(false);
   const themeSaveAttemptRef = useRef(0);
   const historyWriteWarningShownRef = useRef(false);
-  const pendingSelectedIdsRef = useRef<Set<string> | null>(null);
-  const estimatedProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const batchTimingRef = useRef<{ startedAt: number, total: number, completed: number } | null>(null);
   const lastDataFolderWritableRef = useRef<boolean | null>(null);
+  const checkUpdatesRef = useRef<null | (() => Promise<void>)>(null);
   const selectableUpdates = updates.filter(u => u.previousStatus !== 'inapplicable');
   const allSelectableSelected = selectableUpdates.length > 0 && selectedIds.size === selectableUpdates.length;
   const activeIgnoredRulesCount = Object.keys(ignoredUntilById).length;
@@ -156,15 +77,93 @@ export default function App() {
     setToasts(prev => [...prev, { id, message, type }]);
   }, []);
 
-  const getRestoreFailureMessage = (reason?: RestoreFailureReason): string => {
-    if (reason === 'system-protection-disabled') return t('restoreFailDisabled');
-    if (reason === 'frequency-limit') return t('restoreFailFrequency');
-    if (reason === 'access-denied') return t('restoreFailAccess');
-    if (reason === 'service-unavailable') return t('restoreFailService');
-    if (reason === 'verification-failed') return t('restoreFailVerification');
-    if (reason === 'command-failed') return t('restoreFailCommand');
-    return t('restoreFailUnknown');
-  };
+  const resetHistoryWriteWarning = useCallback(() => {
+    historyWriteWarningShownRef.current = false;
+  }, []);
+
+  const {
+    appUpdateInfo,
+    checkingAppVersion,
+    downloadingAppUpdate,
+    appUpdateProgress,
+    lastDownloadedUpdatePath,
+    downloadGuideState,
+    hasAppUpdateBanner,
+    runInitialAppVersionCheck,
+    checkAppUpdate,
+    downloadAppUpdate,
+    closeDownloadGuide
+  } = useAppUpdate({ addToast, t });
+
+  const {
+    isInstalling,
+    isCreatingRestore,
+    cancelBatchRequested,
+    currentInstallingApp,
+    currentLogLine,
+    logEntries,
+    showDetailedLog,
+    currentAppProgress,
+    currentAppProgressMode,
+    installProgress,
+    estimatedRemainingSeconds,
+    isOnline,
+    setIsCreatingRestore,
+    setCurrentInstallingApp,
+    setCurrentLogLine,
+    setCurrentAppProgress,
+    setCurrentAppProgressMode,
+    startEstimatedAppProgress,
+    stopEstimatedAppProgress,
+    markBatchItemStarted,
+    markBatchItemCompleted,
+    toggleDetailedLog,
+    beginInstallSession,
+    initializeBatchProgress,
+    updateBatchProgress,
+    requestBatchCancel,
+    isBatchCancelRequested,
+    resetBatchInstallState
+  } = useBatchInstall({ addToast, t });
+
+  const batchInstallController = useMemo(() => ({
+    beginInstallSession,
+    resetBatchInstallState,
+    initializeBatchProgress,
+    updateBatchProgress,
+    markBatchItemStarted,
+    markBatchItemCompleted,
+    setIsCreatingRestore,
+    setCurrentInstallingApp,
+    setCurrentLogLine,
+    setCurrentAppProgress,
+    setCurrentAppProgressMode,
+    startEstimatedAppProgress,
+    stopEstimatedAppProgress,
+    isBatchCancelRequested
+  }), [
+    beginInstallSession,
+    resetBatchInstallState,
+    initializeBatchProgress,
+    updateBatchProgress,
+    markBatchItemStarted,
+    markBatchItemCompleted,
+    setIsCreatingRestore,
+    setCurrentInstallingApp,
+    setCurrentLogLine,
+    setCurrentAppProgress,
+    setCurrentAppProgressMode,
+    startEstimatedAppProgress,
+    stopEstimatedAppProgress,
+    isBatchCancelRequested
+  ]);
+
+  const {
+    releaseNotesUrlById,
+    resetReleaseNotesState,
+    prefetchReleaseNotesForUpdates,
+    openReleaseNotesForUpdate
+  } = useReleaseNotes({ addToast, t });
 
   const resolveDarkMode = (mode: ThemeMode): boolean => {
     if (mode === 'dark') return true;
@@ -174,26 +173,6 @@ export default function App() {
     }
     return true;
   };
-
-  const stopEstimatedAppProgress = useCallback(() => {
-    if (estimatedProgressTimerRef.current !== null) {
-      clearInterval(estimatedProgressTimerRef.current);
-      estimatedProgressTimerRef.current = null;
-    }
-  }, []);
-
-  const startEstimatedAppProgress = useCallback(() => {
-    stopEstimatedAppProgress();
-    setCurrentAppProgressMode('estimated');
-    estimatedProgressTimerRef.current = setInterval(() => {
-      setCurrentAppProgress((prev) => {
-        if (prev === null) return 3;
-        if (prev >= 92) return prev;
-        const step = prev < 25 ? 3 : prev < 55 ? 2 : 1;
-        return Math.min(prev + step, 92);
-      });
-    }, 1200);
-  }, [stopEstimatedAppProgress]);
 
   const refreshDataFolderStatus = useCallback(async (silent = true) => {
     try {
@@ -231,33 +210,6 @@ export default function App() {
   }, [addToast, t]);
 
   useEffect(() => {
-    const handleLog = (_event: unknown, log: string) => {
-      const cleanLog = log.replace(/\[#+ -+\]/g, '').trim();
-      if (!cleanLog) return;
-      setCurrentLogLine(cleanLog);
-      const realPercent = parsePercentFromWingetLog(cleanLog);
-      if (realPercent !== null) {
-        stopEstimatedAppProgress();
-        setCurrentAppProgressMode('real');
-        setCurrentAppProgress((prev) => Math.max(prev ?? 0, realPercent));
-        return;
-      }
-
-      const estimatedPercent = parseEstimatedPercentFromWingetLog(cleanLog);
-      if (estimatedPercent !== null) {
-        setCurrentAppProgressMode((prev) => prev === 'real' ? prev : 'estimated');
-        setCurrentAppProgress((prev) => Math.max(prev ?? 0, estimatedPercent));
-      }
-    };
-
-    window.ipcRenderer.on('winget:log', handleLog);
-    return () => {
-      window.ipcRenderer.off('winget:log', handleLog);
-      stopEstimatedAppProgress();
-    };
-  }, [stopEstimatedAppProgress]);
-
-  useEffect(() => {
     if (initializedRef.current) return;
     initializedRef.current = true;
 
@@ -290,28 +242,13 @@ export default function App() {
 
       await refreshDataFolderStatus(false);
 
-      if (!hasRunInitialAppVersionCheck) {
-        hasRunInitialAppVersionCheck = true;
-        void window.ipcRenderer
-          .invoke('system:check-app-update')
-          .then((result) => setAppUpdateInfo(result))
-          .catch((error) => console.error('[App] Silent app-update check failed:', error));
-      }
+      void runInitialAppVersionCheck();
 
       void refreshWingetHealth(true);
     };
 
     void initializeApp();
-  }, [refreshDataFolderStatus, refreshWingetHealth]);
-
-  useEffect(() => {
-    const handleAppUpdateProgress = (_event: unknown, progress: { percent: number | null }) => {
-      setAppUpdateProgress(progress.percent);
-    };
-
-    window.ipcRenderer.on('app-update:download-progress', handleAppUpdateProgress);
-    return () => window.ipcRenderer.off('app-update:download-progress', handleAppUpdateProgress);
-  }, []);
+  }, [refreshDataFolderStatus, refreshWingetHealth, runInitialAppVersionCheck]);
 
   useEffect(() => {
     if (themeMode !== 'system' || typeof window.matchMedia !== 'function') return;
@@ -328,17 +265,6 @@ export default function App() {
     mediaQuery.addListener(handleChange);
     return () => mediaQuery.removeListener(handleChange);
   }, [themeMode]);
-
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
 
   useEffect(() => {
     const handleFocus = () => { void refreshDataFolderStatus(true); };
@@ -376,38 +302,6 @@ export default function App() {
     document.documentElement.classList.toggle('dark', darkMode);
     document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
   }, [darkMode]);
-
-  useEffect(() => {
-    if (!isInstalling || !batchTimingRef.current || !installProgress) {
-      setEstimatedRemainingSeconds(null);
-      return;
-    }
-
-    const updateEstimate = () => {
-      const timing = batchTimingRef.current;
-      if (!timing) {
-        setEstimatedRemainingSeconds(null);
-        return;
-      }
-
-      const completed = installProgress.current;
-      const total = installProgress.total;
-      if (completed <= 0 || total <= 0 || completed >= total) {
-        setEstimatedRemainingSeconds(completed >= total ? 0 : null);
-        return;
-      }
-
-      const elapsedMs = Math.max(0, Date.now() - timing.startedAt);
-      const averagePerCompletedMs = elapsedMs / completed;
-      const remainingItems = Math.max(0, total - completed);
-      const estimateSeconds = Math.round((averagePerCompletedMs * remainingItems) / 1000);
-      setEstimatedRemainingSeconds(Math.max(0, estimateSeconds));
-    };
-
-    updateEstimate();
-    const intervalId = setInterval(updateEstimate, 1000);
-    return () => clearInterval(intervalId);
-  }, [installProgress, isInstalling]);
 
   const toggleTheme = () => {
     const previousMode = themeMode;
@@ -452,92 +346,44 @@ export default function App() {
     }
   };
 
-  const checkAppUpdate = async (silent = false) => {
-    setCheckingAppVersion(true);
-    try {
-      const result = await window.ipcRenderer.invoke('system:check-app-update');
-      setAppUpdateInfo(result);
-
-      if (silent) return;
-
-      if (!result.success) {
-        if (result.offline) {
-          addToast(t('appUpdateOffline'), 'info');
-        } else {
-          addToast(t('appUpdateCheckFailed'), 'warning');
-        }
-        return;
+  const {
+    showRestoreModal,
+    conflictState,
+    restoreDecisionState,
+    restoreVerificationAlert,
+    showSummary,
+    batchResults,
+    preflightResult,
+    runningPreflight,
+    restoreVerificationSummary,
+    summaryStats,
+    handleUpdateClick,
+    processUpdates,
+    retryFailedFromSummary,
+    hideSummary,
+    closeRestoreVerificationAlert,
+    closeRestoreModal,
+    handleRestoreDecisionContinue,
+    handleRestoreDecisionCancel,
+    handlePreflightContinue,
+    handlePreflightCancel,
+    clearFlowState
+  } = useUpdateFlow({
+    addToast,
+    t,
+    updates,
+    selectedIds,
+    setUpdates,
+    setSelectedIds,
+    addHistoryEntrySafely,
+    resetHistoryWriteWarning,
+    refreshUpdatesAfterBatch: async () => {
+      if (checkUpdatesRef.current) {
+        await checkUpdatesRef.current();
       }
-
-      if (result.hasUpdate) {
-        addToast(`${t('appUpdateAvailable')}: v${result.latestVersion}`, 'info');
-      } else {
-        addToast(t('appUpdateNoUpdates'), 'info');
-      }
-    } catch (error) {
-      console.error('[App] Failed to check app version:', error);
-      if (!silent) {
-        addToast(t('appUpdateCheckFailed'), 'warning');
-      }
-    } finally {
-      setCheckingAppVersion(false);
-    }
-  };
-
-  const downloadAppUpdate = async () => {
-    if (!appUpdateInfo?.assetUrl || !appUpdateInfo.assetName) {
-      addToast(t('appUpdateMissingAsset'), 'warning');
-      return;
-    }
-
-    setDownloadingAppUpdate(true);
-    setAppUpdateProgress(0);
-    setLastDownloadedUpdatePath(null);
-    setDownloadGuideState(null);
-    try {
-      const result = await window.ipcRenderer.invoke(
-        'system:download-app-update',
-        appUpdateInfo.assetUrl,
-        appUpdateInfo.assetName,
-        appUpdateInfo.assetSha256
-      );
-
-      if (result.canceled) {
-        addToast(t('appUpdateDownloadCanceled'), 'info');
-        return;
-      }
-
-      if (result.success) {
-        addToast(t('appUpdateDownloadSuccess'), 'success');
-        const isZip = !!appUpdateInfo?.assetName && /\.zip$/i.test(appUpdateInfo.assetName);
-        if (result.filePath) {
-          setLastDownloadedUpdatePath(result.filePath);
-          setDownloadGuideState({ filePath: result.filePath, isZip });
-          addToast(`${t('appUpdateSavedTo')} ${result.filePath}`, 'info');
-        }
-        if (result.hashVerified) {
-          addToast(t('appUpdateHashVerified'), 'success');
-        } else {
-          addToast(t('appUpdateHashUnavailable'), 'warning');
-        }
-        addToast(isZip ? t('appUpdateAfterDownloadZip') : t('appUpdateAfterDownloadExe'), 'warning');
-        return;
-      }
-
-      console.error('[App] App update download failed:', result.error);
-      if ((result.error || '').includes('HashMismatch')) {
-        addToast(t('appUpdateHashMismatch'), 'error');
-        return;
-      }
-      addToast(t('appUpdateDownloadFailed'), 'error');
-    } catch (error) {
-      console.error('[App] App update download threw error:', error);
-      addToast(t('appUpdateDownloadFailed'), 'error');
-    } finally {
-      setDownloadingAppUpdate(false);
-      setTimeout(() => setAppUpdateProgress(null), 500);
-    }
-  };
+    },
+    batchInstall: batchInstallController
+  });
 
   const exportDiagnostics = async () => {
     setExportingDiagnostics(true);
@@ -582,50 +428,6 @@ export default function App() {
     return `${compact.slice(0, limit)}...`;
   };
 
-  const openReleaseNotesForUpdate = async (update: AppUpdate) => {
-    const { id } = update;
-    const cachedUrl = releaseNotesUrlById[id];
-    if (typeof cachedUrl === 'string' && cachedUrl.length > 0) {
-      try {
-        await window.ipcRenderer.invoke('system:open-url', cachedUrl);
-      } catch (error) {
-        console.error(`[App] Failed to open cached release notes URL for ${id}:`, error);
-        addToast(t('releaseNotesUnavailable'), 'warning');
-      }
-      return;
-    }
-
-    if (cachedUrl === null) {
-      addToast(t('releaseNotesUnavailable'), 'info');
-      return;
-    }
-
-    if (releaseNotesLoadingById[id]) return;
-    setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: true }));
-
-    try {
-      const fetchedUrl = await window.ipcRenderer.invoke('winget:get-release-notes-url', id);
-      const normalizedUrl = fetchedUrl && fetchedUrl.trim().length > 0 ? fetchedUrl : null;
-      setReleaseNotesUrlById((prev) => ({ ...prev, [id]: normalizedUrl }));
-
-      if (normalizedUrl) {
-        await window.ipcRenderer.invoke('system:open-url', normalizedUrl);
-      } else {
-        addToast(t('releaseNotesUnavailable'), 'info');
-      }
-    } catch (error) {
-      console.error(`[App] Failed to fetch release notes for ${id}:`, error);
-      setReleaseNotesUrlById((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-      addToast(t('releaseNotesCheckFailed'), 'warning');
-    } finally {
-      setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: false }));
-    }
-  };
-
   const ignoreUpdateForSevenDays = async (update: AppUpdate) => {
     try {
       const rule = await window.ipcRenderer.invoke('ignore:add-temporary', update.id, update.available, 7) as IgnoreRule;
@@ -652,8 +454,7 @@ export default function App() {
   const checkUpdates = async () => {
     setLoading(true);
     setUpdates([]);
-    setReleaseNotesUrlById({});
-    setReleaseNotesLoadingById({});
+    resetReleaseNotesState();
     setIgnoredHiddenCount(0);
     setHasChecked(false);
     const minLoadTime = new Promise(resolve => setTimeout(resolve, 800));
@@ -674,6 +475,7 @@ export default function App() {
       }
 
       setUpdates(filteredAvailable);
+      void prefetchReleaseNotesForUpdates(filteredAvailable);
       // Only auto-select updates that are NOT inapplicable
       const installable = filteredAvailable.filter((u) => u.previousStatus !== 'inapplicable');
       const installableIds = new Set(installable.map((u) => u.id));
@@ -722,6 +524,16 @@ export default function App() {
       setLoading(false);
     }
   };
+  checkUpdatesRef.current = checkUpdates;
+
+  const openSystemProtection = async () => {
+    try {
+      await window.ipcRenderer.invoke('system:open-system-restore');
+    } catch (error) {
+      console.error('[App] Failed to open System Protection:', error);
+      addToast(t('preflightActionFailed'), 'warning');
+    }
+  };
 
   const toggleSelect = (id: string) => {
     const newSelected = new Set(selectedIds);
@@ -740,357 +552,6 @@ export default function App() {
       setSelectedIds(new Set(selectableUpdates.map(u => u.id)));
     }
   };
-
-  const handleUpdateClick = async (selectedOverride?: Set<string>) => {
-    const effectiveSelected = selectedOverride ?? selectedIds;
-    if (effectiveSelected.size === 0) return;
-    pendingSelectedIdsRef.current = new Set(effectiveSelected);
-    setRunningPreflight(true);
-    try {
-      const result = await window.ipcRenderer.invoke('system:run-preflight');
-      if (!result.success || result.overall !== 'ok') {
-        setPreflightResult(result);
-        return;
-      }
-      setShowRestoreModal(true);
-    } catch (error) {
-      console.error('[App] Preflight failed unexpectedly:', error);
-      addToast(t('preflightUnexpectedFailure'), 'warning');
-      setShowRestoreModal(true);
-    } finally {
-      setRunningPreflight(false);
-    }
-  };
-
-  const askContinueWithoutRestore = (message: string, details?: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      setRestoreDecisionState({
-        message,
-        details,
-        onContinue: () => resolve(true),
-        onCancel: () => resolve(false)
-      });
-    });
-  };
-
-  const processUpdates = async (createRestore: boolean) => {
-    setShowRestoreModal(false);
-    setIsInstalling(true);
-    setBatchResults([]);
-    setRestoreVerificationSummary(null);
-    historyWriteWarningShownRef.current = false;
-    let operationMarked = false;
-    let createdRestoreMeta: { sequenceNumber: number; description: string } | null = null;
-    const selectedSnapshot = pendingSelectedIdsRef.current
-      ? new Set(pendingSelectedIdsRef.current)
-      : new Set(selectedIds);
-    pendingSelectedIdsRef.current = null;
-    if (selectedSnapshot.size === 0) {
-      setIsInstalling(false);
-      addToast(t('summaryRetryNothing'), 'info');
-      return;
-    }
-    try {
-      await window.ipcRenderer.invoke('system:set-operation-active', true);
-      operationMarked = true;
-
-      if (createRestore) {
-        setIsCreatingRestore(true);
-        setCurrentLogLine(t('creatingRestore'));
-        try {
-          const result = await window.ipcRenderer.invoke('system:create-restore-point', "All Updater Auto-Restore") as RestorePointResult;
-          if (!result.success) {
-            const specificMessage = getRestoreFailureMessage(result.reason);
-            console.error('[App] Restore point failed:', result);
-            addToast(specificMessage, "error");
-            setCurrentLogLine(specificMessage);
-            const continueWithoutRestore = await askContinueWithoutRestore(specificMessage, result.details);
-            setRestoreDecisionState(null);
-            if (!continueWithoutRestore) {
-              addToast(t('restoreFailedAbort'), "warning");
-              return;
-            }
-            addToast(t('restoreContinueWithoutPoint'), "warning");
-          } else if (typeof result.sequenceNumber === 'number' && typeof result.description === 'string') {
-            createdRestoreMeta = {
-              sequenceNumber: result.sequenceNumber,
-              description: result.description
-            };
-          }
-        } catch (e) {
-          console.error("Failed to create restore point", e);
-          const details = getErrorMessage(e);
-          const unknownMessage = t('restoreFailUnknown');
-          addToast(`${t('restoreFailedAbort')} ${unknownMessage}`, "error");
-          setCurrentLogLine(unknownMessage);
-          const continueWithoutRestore = await askContinueWithoutRestore(unknownMessage, details);
-          setRestoreDecisionState(null);
-          if (!continueWithoutRestore) {
-            setCurrentLogLine(null);
-            return;
-          }
-          addToast(t('restoreContinueWithoutPoint'), "warning");
-        } finally {
-          setIsCreatingRestore(false);
-        }
-      }
-
-      const total = selectedSnapshot.size;
-      let current = 0;
-      const currentResults: HistoryItem[] = [];
-      setInstallProgress({ current, total });
-      batchTimingRef.current = { startedAt: Date.now(), total, completed: 0 };
-      setEstimatedRemainingSeconds(null);
-
-      const queue = Array.from(selectedSnapshot);
-
-      // Iteration using while to allow "retry" without complex index math
-      let i = 0;
-      while (i < queue.length) {
-        const id = queue[i];
-        const update = updates.find(u => u.id === id);
-        const appName = update?.name || id;
-        const appVersion = update?.available || 'unknown';
-
-        try {
-          setCurrentInstallingApp(appName);
-          setCurrentLogLine(null);
-          setCurrentAppProgress(3);
-          setCurrentAppProgressMode('estimated');
-          startEstimatedAppProgress();
-
-          // Wait for conflict resolution if needed
-          let retry = true;
-          while (retry) {
-            try {
-              retry = false;
-              await window.ipcRenderer.invoke('winget:install-update', id);
-            } catch (e: unknown) {
-              const errorMessage = getErrorMessage(e);
-              // Check specifically for AppInUse
-              if (errorMessage.includes('AppInUse')) {
-                // Show Conflict Modal and wait for user decision
-                const userDecision = await new Promise<'retry' | 'skip'>((resolve) => {
-                  setConflictState({
-                    appName,
-                    onRetry: () => resolve('retry'),
-                    onSkip: () => resolve('skip')
-                  });
-                });
-
-                setConflictState(null); // Close modal
-
-                if (userDecision === 'retry') {
-                  retry = true;
-                  continue; // Loop internal while
-                } else {
-                  // Skip
-                  throw e; // Re-throw to hit catch block as failed/skipped
-                }
-              }
-              throw e; // Throw other errors
-            }
-          }
-
-          const historyEntry: Omit<HistoryItem, 'date'> = {
-            id,
-            appName,
-            version: appVersion, // This is the new version
-            previousVersion: update?.version, // This is the old version
-            status: 'success'
-          };
-          await addHistoryEntrySafely(historyEntry);
-          currentResults.push({ ...historyEntry, date: new Date().toISOString() });
-
-          addToast(`${t('updateSuccess')} ${appName}`, 'success');
-          stopEstimatedAppProgress();
-          setCurrentAppProgressMode('real');
-          setCurrentAppProgress(100);
-
-          setUpdates(prev => prev.filter(u => u.id !== id));
-          setSelectedIds(prev => {
-            const next = new Set(prev);
-            next.delete(id);
-            return next;
-          });
-        } catch (e: unknown) {
-          const errorMessage = getErrorMessage(e);
-          console.error(`Failed to update ${id}`, e);
-          const isInapplicable = errorMessage.includes('Inapplicable');
-          const isReboot = errorMessage.includes('RebootRequired');
-          const isInUse = errorMessage.includes('AppInUse');
-          const isSecurity = errorMessage.includes('HashMismatch');
-          const isFileLockDetected = errorMessage.includes('FileLockDetected');
-
-          let status: 'failed' | 'inapplicable' | 'reboot' | 'in-use' | 'security-error' = 'failed';
-          if (isInapplicable) status = 'inapplicable';
-          if (isReboot) status = 'reboot';
-          if (isInUse) status = 'in-use'; // Only if skipped
-          if (isSecurity) status = 'security-error';
-
-          const historyEntry: Omit<HistoryItem, 'date'> = {
-            id,
-            appName,
-            version: appVersion,
-            previousVersion: update?.version,
-            status,
-            details: errorMessage
-          };
-          await addHistoryEntrySafely(historyEntry);
-          currentResults.push({ ...historyEntry, date: new Date().toISOString() });
-
-          if (isInapplicable) {
-            addToast(`${appName}: ${t('updateSkipped')}`, 'warning');
-          } else if (isSecurity) {
-            addToast(`${appName}: ${t('updateSecuritySkipped')}`, 'error');
-          } else if (isReboot) {
-            addToast(`${appName}: ${t('updateRebootPending')}`, 'warning');
-            setUpdates(prev => prev.filter(u => u.id !== id));
-            setSelectedIds(prev => {
-              const next = new Set(prev);
-              next.delete(id);
-              return next;
-            });
-          } else if (isInUse) {
-            addToast(`${appName}: ${t('updateInUseSkipped')}`, 'warning');
-          } else if (isFileLockDetected) {
-            addToast(`${appName}: ${t('updateFileLockDetected')}`, 'warning');
-          } else {
-            addToast(`${t('updateFailed')} ${appName}`, 'error');
-          }
-        }
-        current++;
-        setInstallProgress({ current, total });
-        if (batchTimingRef.current) {
-          batchTimingRef.current.completed = current;
-        }
-        stopEstimatedAppProgress();
-        setCurrentAppProgress(null);
-        setCurrentAppProgressMode(null);
-        i++;
-      }
-
-      if (createdRestoreMeta) {
-        try {
-          const verification = await window.ipcRenderer.invoke(
-            'system:verify-restore-point',
-            createdRestoreMeta.sequenceNumber,
-            createdRestoreMeta.description
-          ) as RestorePointVerificationResult;
-
-          if (!verification.confirmed) {
-            const message = t('restorePostBatchMissing');
-            const detailLines = [
-              `${t('restoreSequenceLabel')}: ${verification.sequenceNumber}`,
-              `${t('restoreExpectedDescriptionLabel')}: ${verification.expectedDescription}`
-            ];
-
-            if (verification.actualDescription) {
-              detailLines.push(`${t('restoreActualDescriptionLabel')}: ${verification.actualDescription}`);
-            }
-            if (verification.details) {
-              detailLines.push(verification.details);
-            }
-
-            setRestoreVerificationAlert({
-              message,
-              details: detailLines.join('\n')
-            });
-            setRestoreVerificationSummary({
-              status: 'missing',
-              message,
-              details: detailLines.join('\n')
-            });
-            addToast(message, 'error');
-          } else {
-            const detailLines = [
-              `${t('restoreSequenceLabel')}: ${verification.sequenceNumber}`,
-              `${t('restoreExpectedDescriptionLabel')}: ${verification.expectedDescription}`
-            ];
-            if (verification.actualDescription) {
-              detailLines.push(`${t('restoreActualDescriptionLabel')}: ${verification.actualDescription}`);
-            }
-            setRestoreVerificationSummary({
-              status: 'confirmed',
-              message: t('restorePostBatchConfirmed'),
-              details: detailLines.join('\n')
-            });
-          }
-        } catch (verificationError) {
-          const message = t('restorePostBatchUnverified');
-          const details = getErrorMessage(verificationError);
-          setRestoreVerificationAlert({ message, details });
-          setRestoreVerificationSummary({
-            status: 'unverified',
-            message,
-            details
-          });
-          addToast(message, 'warning');
-        }
-      }
-
-      setBatchResults(currentResults);
-      if (currentResults.length > 0) {
-        setShowSummary(true);
-      }
-    } finally {
-      stopEstimatedAppProgress();
-      setIsInstalling(false);
-      setIsCreatingRestore(false);
-      setInstallProgress(null);
-      setCurrentInstallingApp(null);
-      setCurrentLogLine(null);
-      setCurrentAppProgress(null);
-      setCurrentAppProgressMode(null);
-      setEstimatedRemainingSeconds(null);
-      batchTimingRef.current = null;
-      setConflictState(null);
-      setRestoreDecisionState(null);
-      setPreflightResult(null);
-      if (operationMarked) {
-        try {
-          await window.ipcRenderer.invoke('system:set-operation-active', false);
-        } catch (cleanupError) {
-          console.error('Failed to reset operation state', cleanupError);
-        }
-      }
-    }
-  };
-
-  const retryFailedFromSummary = async () => {
-    const retryableStatuses = new Set(['failed', 'in-use', 'security-error']);
-    const availableIds = new Set(updates.map((u) => u.id));
-    const retryIds = batchResults
-      .filter((item) => retryableStatuses.has(item.status))
-      .map((item) => item.id)
-      .filter((id) => availableIds.has(id));
-
-    if (retryIds.length === 0) {
-      addToast(t('summaryRetryNothing'), 'info');
-      return;
-    }
-
-    setSelectedIds(new Set(retryIds));
-    setShowSummary(false);
-    await handleUpdateClick(new Set(retryIds));
-  };
-
-  const summaryTotal = batchResults.length;
-  const summaryFailedCount = batchResults.filter(
-    r => r.status === 'failed' || r.status === 'inapplicable' || r.status === 'in-use' || r.status === 'security-error'
-  ).length;
-  const summaryUpdatedCount = batchResults.filter((r) => r.status === 'success').length;
-  const summaryRebootCount = batchResults.filter((r) => r.status === 'reboot').length;
-  const summaryNoChangeCount = batchResults.filter((r) => r.status === 'inapplicable' || r.status === 'skipped').length;
-  const summaryActionNeededCount = batchResults.filter((r) => r.status === 'failed' || r.status === 'in-use' || r.status === 'security-error').length;
-  const retryableStatuses = new Set(['failed', 'in-use', 'security-error']);
-  const availableUpdateIds = new Set(updates.map((u) => u.id));
-  const retryableSummaryIds = batchResults
-    .filter((r) => retryableStatuses.has(r.status))
-    .map((r) => r.id)
-    .filter((id) => availableUpdateIds.has(id));
-  const hasRetryableSummaryItems = retryableSummaryIds.length > 0;
-  const hasAppUpdateBanner = Boolean(appUpdateInfo?.success && appUpdateInfo.hasUpdate);
 
   return (
     <Layout
@@ -1434,8 +895,9 @@ export default function App() {
                     isSelected={selectedIds.has(update.id)}
                     onToggle={() => toggleSelect(update.id)}
                     releaseNotesUrl={releaseNotesUrlById[update.id]}
-                    isLoadingReleaseNotes={Boolean(releaseNotesLoadingById[update.id])}
-                    onOpenReleaseNotes={() => { void openReleaseNotesForUpdate(update); }}
+                    onOpenReleaseNotes={typeof releaseNotesUrlById[update.id] === 'string'
+                      ? () => { void openReleaseNotesForUpdate(update); }
+                      : undefined}
                     onIgnoreFor7Days={() => { void ignoreUpdateForSevenDays(update); }}
                   />
                 ))}
@@ -1451,180 +913,25 @@ export default function App() {
             setHasChecked(false);
             setUpdates([]);
             setSelectedIds(new Set());
-            setShowSummary(false);
             setIsWingetMissing(false);
             setIgnoredUntilById({});
             setIgnoredHiddenCount(0);
+            clearFlowState();
           }}
         />
       )}
 
-      {/* Summary Report Modal */}
-      {showSummary && (
-        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-900/60 backdrop-blur-md transition-all p-4">
-          <div className="w-full max-w-xl rounded-3xl bg-white p-8 shadow-2xl dark:bg-slate-800 border border-black/10 dark:border-white/10 max-h-[80vh] flex flex-col">
-            <div className="mb-6 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-2xl font-bold text-slate-900 dark:text-white">{t('summaryTitle')}</h3>
-                <p className="text-slate-900 dark:text-sky-100">{t('summaryDesc')}</p>
-              </div>
-              <button
-                onClick={() => {
-                  setShowSummary(false);
-                  checkUpdates();
-                }}
-                className="rounded-full p-2 hover:bg-slate-200 dark:hover:bg-white/10 transition-colors"
-              >
-                <XCircle className="h-6 w-6 text-slate-500" />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto space-y-4 pr-2">
-              {/* Logic for summary message */}
-              {(() => {
-                let message = t('summarySuccess');
-
-                if (summaryFailedCount === summaryTotal) {
-                  message = t('summaryFailed'); // Or use specific "inapplicable" one if needed
-                } else if (summaryFailedCount > 0) {
-                  message = t('summaryPartial');
-                }
-
-                return (
-                  <div className="mb-4 rounded-2xl border border-slate-300 bg-slate-100 p-6 dark:border-white/10 dark:bg-white/5">
-                    <p className="text-xl text-slate-900 dark:text-sky-100 italic text-center font-medium leading-relaxed">
-                      {message}
-                    </p>
-                  </div>
-                );
-              })()}
-
-              <div className="grid gap-2 sm:grid-cols-2">
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900/40 dark:bg-emerald-900/20">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">{t('summaryCountUpdated')}</p>
-                  <p className="text-xl font-bold text-emerald-800 dark:text-emerald-200">{summaryUpdatedCount}</p>
-                </div>
-                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 dark:border-blue-900/40 dark:bg-blue-900/20">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-blue-700 dark:text-blue-300">{t('summaryCountReboot')}</p>
-                  <p className="text-xl font-bold text-blue-800 dark:text-blue-200">{summaryRebootCount}</p>
-                </div>
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/40 dark:bg-amber-900/20">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-300">{t('summaryCountNoChange')}</p>
-                  <p className="text-xl font-bold text-amber-800 dark:text-amber-200">{summaryNoChangeCount}</p>
-                </div>
-                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-900/20">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-rose-700 dark:text-rose-300">{t('summaryCountActionNeeded')}</p>
-                  <p className="text-xl font-bold text-rose-800 dark:text-rose-200">{summaryActionNeededCount}</p>
-                </div>
-              </div>
-
-              {restoreVerificationSummary && (
-                <div className={clsx(
-                  "rounded-2xl border p-4",
-                  restoreVerificationSummary.status === 'confirmed'
-                    ? "border-emerald-200 bg-emerald-50 dark:border-emerald-900/40 dark:bg-emerald-900/20"
-                    : restoreVerificationSummary.status === 'missing'
-                      ? "border-red-200 bg-red-50 dark:border-red-900/40 dark:bg-red-900/20"
-                      : "border-amber-200 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/20"
-                )}>
-                  <p className={clsx(
-                    "text-sm font-bold",
-                    restoreVerificationSummary.status === 'confirmed'
-                      ? "text-emerald-800 dark:text-emerald-300"
-                      : restoreVerificationSummary.status === 'missing'
-                        ? "text-red-800 dark:text-red-300"
-                        : "text-amber-800 dark:text-amber-300"
-                  )}>
-                    {restoreVerificationSummary.message}
-                  </p>
-                  {restoreVerificationSummary.details && (
-                    <p className="mt-2 whitespace-pre-wrap text-xs font-mono text-slate-900 dark:text-sky-100">
-                      {restoreVerificationSummary.details}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {batchResults.map((res, i) => (
-                <div key={i} className="flex items-center gap-4 rounded-2xl border border-slate-300 bg-slate-100 p-4 dark:border-white/5 dark:bg-white/5">
-                  <div className={clsx(
-                    "flex h-10 w-10 shrink-0 items-center justify-center rounded-full shadow-sm",
-                    res.status === 'success' ? "bg-green-500 text-white" :
-                      res.status === 'reboot' ? "bg-blue-600 text-white" :
-                        res.status === 'in-use' ? "bg-amber-500 text-white" :
-                          res.status === 'inapplicable' ? "bg-amber-500 text-white" :
-                        res.status === 'security-error' ? "bg-orange-600 text-white" :
-                          "bg-red-500 text-white"
-                  )}>
-                    {res.status === 'success' && <CheckCircle className="h-5 w-5" />}
-                    {res.status === 'reboot' && <RefreshCw className="h-5 w-5" />}
-                    {res.status === 'in-use' && <AlertTriangle className="h-5 w-5" />}
-                    {res.status === 'inapplicable' && <AlertCircle className="h-5 w-5" />}
-                    {res.status === 'security-error' && <AlertTriangle className="h-5 w-5" />}
-                    {res.status === 'failed' && <XCircle className="h-5 w-5" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h4 className="font-bold text-slate-900 dark:text-white truncate">{res.appName}</h4>
-                    <p className="text-[10px] text-slate-900 dark:text-sky-100 font-bold uppercase tracking-wider mb-1">
-                      {t('versionLabel')} {res.version}
-                    </p>
-                    <p className="text-xs text-slate-900 dark:text-sky-100 italic font-medium">
-                      {res.status === 'success' ? t('statusSuccess') :
-                        res.status === 'reboot' ? t('statusReboot') :
-                          res.status === 'in-use' ? t('statusInUse') :
-                            res.status === 'inapplicable' ? t('statusInapplicable') :
-                              res.status === 'security-error' ? t('statusSecurity') :
-                                t('statusFailed')}
-                    </p>
-                  </div>
-                </div>
-              ))}
-
-              {batchResults.some(r => r.status === 'success' || r.status === 'reboot') && (
-                <div className="rounded-2xl bg-blue-500/10 p-4 border border-blue-500/20">
-                  <p className="text-sm font-medium text-blue-700 dark:text-blue-300 flex items-center gap-2">
-                    <RefreshCw className="h-4 w-4" />
-                    {t('restartRecommendation')}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            <div className="mt-6 grid gap-2 sm:grid-cols-2">
-              {hasRetryableSummaryItems && (
-                <button
-                  onClick={() => { void retryFailedFromSummary(); }}
-                  className="rounded-2xl border border-amber-300 bg-amber-50 py-3 text-sm font-bold text-amber-700 transition-colors hover:bg-amber-100 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/30"
-                >
-                  {t('summaryRetryFailed')}
-                </button>
-              )}
-              <button
-                onClick={exportDiagnostics}
-                disabled={exportingDiagnostics}
-                className={clsx(
-                  "rounded-2xl border py-3 text-sm font-bold transition-colors",
-                  exportingDiagnostics
-                    ? "cursor-not-allowed border-slate-300 bg-slate-100 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-500"
-                    : "border-slate-300 bg-white text-slate-900 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-sky-100 dark:hover:bg-white/10"
-                )}
-              >
-                {exportingDiagnostics ? `${t('exportDiagnostics')}...` : t('summaryExportDiagnostics')}
-              </button>
-            </div>
-
-            <button
-              onClick={() => {
-                setShowSummary(false);
-                checkUpdates();
-              }}
-              className="mt-3 w-full rounded-2xl bg-blue-600 py-4 font-bold text-white shadow-lg shadow-blue-500/30 transition-all hover:bg-blue-700 dark:hover:bg-blue-500 hover:scale-[1.02] active:scale-[0.98]"
-            >
-              {summaryFailedCount === summaryTotal ? t('thanksNothing') : t('closeSuccess')}
-            </button>
-          </div>
-        </div>
-      )}
+      <SummaryModal
+        isOpen={showSummary}
+        batchResults={batchResults}
+        summaryStats={summaryStats}
+        restoreVerificationSummary={restoreVerificationSummary}
+        exportingDiagnostics={exportingDiagnostics}
+        onRetryFailed={() => { void retryFailedFromSummary(); }}
+        onExportDiagnostics={() => { void exportDiagnostics(); }}
+        onOpenSystemProtection={() => { void openSystemProtection(); }}
+        onClose={hideSummary}
+      />
 
       {/* Conflict Modal */}
       {conflictState && (
@@ -1640,14 +947,8 @@ export default function App() {
           isOpen={Boolean(restoreDecisionState)}
           message={restoreDecisionState.message}
           details={restoreDecisionState.details}
-          onContinue={() => {
-            restoreDecisionState.onContinue();
-            setRestoreDecisionState(null);
-          }}
-          onCancel={() => {
-            restoreDecisionState.onCancel();
-            setRestoreDecisionState(null);
-          }}
+          onContinue={handleRestoreDecisionContinue}
+          onCancel={handleRestoreDecisionCancel}
         />
       )}
 
@@ -1656,7 +957,7 @@ export default function App() {
           isOpen={Boolean(restoreVerificationAlert)}
           message={restoreVerificationAlert.message}
           details={restoreVerificationAlert.details}
-          onClose={() => setRestoreVerificationAlert(null)}
+          onClose={closeRestoreVerificationAlert}
         />
       )}
 
@@ -1664,19 +965,8 @@ export default function App() {
         <PreflightModal
           isOpen={Boolean(preflightResult)}
           result={preflightResult}
-          onContinue={() => {
-            const canContinue = preflightResult.overall !== 'error';
-            setPreflightResult(null);
-            if (canContinue) {
-              setShowRestoreModal(true);
-            } else {
-              pendingSelectedIdsRef.current = null;
-            }
-          }}
-          onCancel={() => {
-            pendingSelectedIdsRef.current = null;
-            setPreflightResult(null);
-          }}
+          onContinue={handlePreflightContinue}
+          onCancel={handlePreflightCancel}
         />
       )}
 
@@ -1685,135 +975,32 @@ export default function App() {
 
       <RestoreModal
         isOpen={showRestoreModal}
-        onClose={() => {
-          pendingSelectedIdsRef.current = null;
-          setShowRestoreModal(false);
-        }}
+        onClose={closeRestoreModal}
         onConfirm={() => processUpdates(true)}
         onSkip={() => processUpdates(false)}
       />
 
-      {isCreatingRestore && (
-        <div className="fixed inset-0 z-[110] flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-md transition-all">
-          <div className="flex flex-col items-center space-y-6 rounded-3xl bg-white p-12 shadow-2xl dark:bg-slate-800 border border-white/10">
-            <div className="relative">
-              <div className="absolute -inset-4 rounded-full bg-blue-500/20 blur-xl animate-pulse" />
-              <RefreshCw className="relative h-16 w-16 animate-spin text-blue-600 dark:text-blue-400" />
-            </div>
-            <div className="text-center space-y-2">
-              <h3 className="text-xl font-bold text-slate-800 dark:text-white">{t('creatingRestore')}</h3>
-              <p className="text-slate-800 dark:text-sky-100 max-w-xs">
-                {t('restoreWait')}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      <InstallStateOverlay
+        isCreatingRestore={isCreatingRestore}
+        isInstalling={isInstalling}
+        currentInstallingApp={currentInstallingApp}
+        currentLogLine={currentLogLine}
+        logEntries={logEntries}
+        showDetailedLog={showDetailedLog}
+        isOnline={isOnline}
+        currentAppProgress={currentAppProgress}
+        currentAppProgressMode={currentAppProgressMode}
+        installProgress={installProgress}
+        estimatedRemainingSeconds={estimatedRemainingSeconds}
+        cancelBatchRequested={cancelBatchRequested}
+        onCancelBatch={requestBatchCancel}
+        onToggleDetailedLog={toggleDetailedLog}
+      />
 
-      {isInstalling && !isCreatingRestore && (
-        <div className="fixed inset-0 z-[110] flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-md transition-all">
-          <div className="flex flex-col items-center space-y-6 rounded-3xl bg-white p-12 shadow-2xl dark:bg-slate-800 border border-white/10">
-            <div className="relative">
-              <div className="absolute -inset-4 rounded-full bg-blue-500/20 blur-xl animate-pulse" />
-              <ArrowDownToLine className="relative h-16 w-16 animate-bounce text-blue-600 dark:text-blue-400" />
-            </div>
-            <div className="text-center space-y-2">
-              <h3 className="text-xl font-bold text-slate-800 dark:text-white">{t('installingUpdates')}</h3>
-              <p className="text-slate-800 dark:text-sky-100 max-w-xs font-medium">
-                {t('updatingApp')} <span className="text-blue-600 dark:text-blue-400">{currentInstallingApp}</span>
-              </p>
-              {currentLogLine && (
-                <p className="text-[10px] text-blue-700/80 dark:text-blue-400/50 italic animate-pulse truncate max-w-[250px]">
-                  {currentLogLine}
-                </p>
-              )}
-            </div>
-            <div className="w-full max-w-xs space-y-3">
-              <div>
-                <p className="mb-1 text-[11px] font-semibold text-slate-700 dark:text-sky-100">
-                  {t('appProgress')}: {currentAppProgress !== null ? `${currentAppProgress}%` : t('unknown')}
-                  {currentAppProgress !== null && currentAppProgressMode === 'estimated' ? ` (${t('estimatedLabel')})` : ''}
-                </p>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
-                  {currentAppProgress !== null ? (
-                    <div
-                      className="h-full bg-blue-600 transition-all duration-300 dark:bg-blue-500"
-                      style={{ width: `${currentAppProgress}%` }}
-                    />
-                  ) : (
-                    <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500/70 dark:bg-blue-400/70" />
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <p className="mb-1 text-[11px] font-semibold text-slate-700 dark:text-sky-100">
-                  {t('batchProgress')}: {installProgress?.current || 0}/{installProgress?.total || 0}
-                </p>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
-                  <div
-                    className="h-full bg-indigo-600 transition-all duration-500 dark:bg-indigo-500"
-                    style={{ width: `${((installProgress?.current || 0) / (installProgress?.total || 1)) * 100}%` }}
-                  />
-                </div>
-              </div>
-              <p className="text-[11px] font-semibold text-slate-700 dark:text-sky-100">
-                {t('estimatedTimeRemaining')}{' '}
-                {estimatedRemainingSeconds === null
-                  ? t('unknown')
-                  : estimatedRemainingSeconds < 60
-                    ? t('lessThanOneMinute')
-                    : t('aboutMinutes').replace('{minutes}', String(Math.max(1, Math.round(estimatedRemainingSeconds / 60))))}
-              </p>
-              <p className="text-[11px] font-medium text-slate-700 dark:text-sky-100">
-                {t('installSlowNetworkHint')}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {downloadGuideState && (
-        <div className="fixed inset-0 z-[175] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-slate-300 bg-white p-6 shadow-2xl dark:border-white/10 dark:bg-slate-900">
-            <h3 className="text-lg font-bold text-slate-900 dark:text-white">{t('downloadGuideTitle')}</h3>
-            <p className="mt-2 text-sm text-slate-800 dark:text-sky-100">
-              {downloadGuideState.isZip ? t('downloadGuideZipIntro') : t('downloadGuideExeIntro')}
-            </p>
-
-            <ol className="mt-3 list-decimal space-y-1 pl-5 text-sm text-slate-800 dark:text-sky-100">
-              <li>{t('downloadGuideStepCloseCurrent')}</li>
-              {downloadGuideState.isZip ? (
-                <>
-                  <li>{t('downloadGuideStepExtract')}</li>
-                  <li>{t('downloadGuideStepRunExtracted')}</li>
-                </>
-              ) : (
-                <li>{t('downloadGuideStepRunInstaller')}</li>
-              )}
-            </ol>
-
-            <p className="mt-3 break-all rounded border border-slate-300 bg-slate-100 p-2 text-[11px] font-mono text-slate-900 dark:border-white/10 dark:bg-black/20 dark:text-sky-100">
-              {downloadGuideState.filePath}
-            </p>
-
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <button
-                onClick={() => window.ipcRenderer.invoke('system:show-item-in-folder', downloadGuideState.filePath)}
-                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-bold text-slate-900 hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-sky-100 dark:hover:bg-white/10"
-              >
-                {t('downloadGuideOpenFolder')}
-              </button>
-              <button
-                onClick={() => setDownloadGuideState(null)}
-                className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-bold text-white hover:bg-blue-700"
-              >
-                {t('downloadGuideClose')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <DownloadGuideModal
+        guide={downloadGuideState}
+        onClose={closeDownloadGuide}
+      />
 
       <ToastContainer toasts={toasts} onClose={removeToast} />
     </Layout>

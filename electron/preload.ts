@@ -14,6 +14,7 @@ const allowedInvokeChannels = new Set([
     'system:open-logs',
     'system:is-elevated',
     'system:get-info',
+    'system:set-online-state',
     'settings:get',
     'settings:set',
     'system:set-operation-active',
@@ -30,6 +31,7 @@ const allowedInvokeChannels = new Set([
     'history:get',
     'history:add',
     'history:clear',
+    'system:factory-reset',
     'ignore:get-active',
     'ignore:add-temporary',
     'system:get-userdata-path'

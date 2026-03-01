@@ -1,13 +1,16 @@
 import { execa } from 'execa';
-import type { AppUpdate, WingetHealthStatus } from '../../shared/types';
-import type { HistoryService } from './history';
-import { SystemService } from './system';
+import type { AppUpdate, WingetHealthStatus } from '../../shared/types.js';
+import type { HistoryService } from './history.js';
+import { SystemService } from './system.js';
 
 export class WingetService {
     private systemService: SystemService;
     private historyService?: Pick<HistoryService, 'getHistory'>;
     private readonly debugWinget = process.env.ALL_UPDATER_DEBUG_WINGET === '1';
     private readonly unknownVersionCooldownMs = 12 * 60 * 60 * 1000;
+    private readonly networkStallMs = 60000;
+    private readonly watchdogCheckMs = 5000;
+    private isOnline = true;
 
     constructor(systemService: SystemService = new SystemService(), historyService?: Pick<HistoryService, 'getHistory'>) {
         this.systemService = systemService;
@@ -18,6 +21,10 @@ export class WingetService {
         if (this.debugWinget) {
             console.log(...args);
         }
+    }
+
+    setOnlineState(isOnline: boolean): void {
+        this.isOnline = isOnline;
     }
 
     private isDisableInteractivityUnsupported(output: string): boolean {
@@ -32,6 +39,7 @@ export class WingetService {
         args: string[],
         options: { timeout: number, includeAll: boolean }
     ): Promise<{ stdout: string, stderr: string, all: string }> {
+        const deadline = Date.now() + options.timeout;
         const queue: string[][] = [
             [...args, '--disable-interactivity'],
             [...args]
@@ -43,10 +51,11 @@ export class WingetService {
             const key = attemptArgs.join('\u0000');
             if (visited.has(key)) continue;
             visited.add(key);
+            const remainingTimeout = Math.max(1000, deadline - Date.now());
 
             const result = await execa('winget', attemptArgs, {
                 reject: false,
-                timeout: options.timeout,
+                timeout: remainingTimeout,
                 encoding: 'utf8',
                 ...(options.includeAll ? { all: true } : {})
             });
@@ -308,18 +317,12 @@ export class WingetService {
                 this.debug('[WingetService] First update:', JSON.stringify(updates[0]));
             }
 
-            // AUTO-HEALING: Only if search fails with known error codes or specific "ambiguous" output that isn't really ambiguous (winget quirk)
+            // Conservative retry: tolerate ambiguous list output, but avoid mutating user winget sources automatically.
             const isAmbiguousError = textOutput.includes('Se encontraron varios paquetes instalados') || textOutput.includes('coinciden con los criterios de entrada');
             const isSourceError = textOutput.includes('0x8a15005e') || textOutput.includes('0x8a150001');
 
-            if (!retriedWithUpgrade && textOutput && updates.length === 0 && (isSourceError || isAmbiguousError)) {
-                console.warn('[WingetService] Source error or Ambiguous output detected. Retrying with minimal flags...');
-
-                // If it was a source error, try to heal sources first
-                if (isSourceError) {
-                    await this.ensureSourcesHealthy();
-                }
-
+            if (!retriedWithUpgrade && textOutput && updates.length === 0 && isAmbiguousError) {
+                console.warn('[WingetService] Ambiguous output detected. Retrying with minimal flags...');
                 // Retry with a minimal upgrade command.
                 // This often fixes the "ambiguous" list behavior on some systems.
                 const retryResult = await this.runWingetCommandWithFallback(
@@ -394,16 +397,6 @@ export class WingetService {
 
             console.error('[WingetService] Failed to check updates:', error);
             throw error;
-        }
-    }
-
-    async ensureSourcesHealthy(): Promise<void> {
-        try {
-            this.debug('[WingetService] Resetting winget sources...');
-            await execa('winget', ['source', 'reset', '--force'], { timeout: 30000 });
-            await execa('winget', ['source', 'update'], { timeout: 60000 });
-        } catch (e) {
-            console.error('[WingetService] Failed to heal sources:', e);
         }
     }
 
@@ -553,6 +546,87 @@ export class WingetService {
         return `${error.message || ''}\n${error.stdout || ''}\n${error.stderr || ''}`;
     }
 
+    private updateDownloadPhaseState(logLine: string, currentState: boolean): boolean {
+        const normalized = this.normalizeText(logLine);
+        if (
+            /iniciando instalacion de paquete|starting package installation|installing|instaland|aplicando|executing|ejecutando|installer hash|hash del instalador/.test(normalized)
+        ) {
+            return false;
+        }
+
+        if (
+            /downloading|descargando|download\b|descarga\b/.test(normalized) ||
+            /\b\d+(?:[.,]\d+)?\s*(kb|mb|gb)\s*\/\s*\d+/i.test(logLine)
+        ) {
+            return true;
+        }
+
+        return currentState;
+    }
+
+    private extractInstallerExitCode(output: string): string | null {
+        const normalized = this.normalizeText(output);
+        const match = normalized.match(
+            /(?:installer error with exit code|error del instalador con el codigo de salida)\s*:?\s*(\d+)/i
+        );
+        return match?.[1] || null;
+    }
+
+    private extractMeaningfulInstallerLines(output: string): string[] {
+        // eslint-disable-next-line no-control-regex
+        const cleaned = output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '\n');
+        const lines = cleaned
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean)
+            .filter(line => !/^[\\|/\-\s]+$/.test(line))
+            .filter(line => !/^\d+(?:[.,]\d+)?\s*(kb|mb|gb)\s*\/\s*\d+/i.test(line))
+            .filter(line => /[A-Za-zÁÉÍÓÚáéíóúÑñ]/.test(line));
+
+        const noiseRegex =
+            /^(winget\s+upgrade|encontrado\b|found\b|descargando\b|downloading\b|microsoft no es responsable|microsoft is not responsible|el propietario de esta aplicacion|the owner of this application|iniciando instalacion de paquete|starting package installation|el hash del instalador se verifico correctamente|installer hash.*verified|error del instalador con el codigo de salida|installer error with exit code)/i;
+
+        const candidates = lines.filter(line => !noiseRegex.test(this.normalizeText(line)));
+        return candidates.length > 0 ? candidates : lines;
+    }
+
+    private buildInstallerFailureError(id: string, output: string, fallbackExitCode?: number): Error {
+        const normalized = this.normalizeText(output);
+        const installerExitCode = this.extractInstallerExitCode(output) || (
+            typeof fallbackExitCode === 'number' ? String(fallbackExitCode) : undefined
+        );
+        const meaningfulLines = this.extractMeaningfulInstallerLines(output);
+        const technicalSummary = meaningfulLines.slice(-2).join(' | ') || (
+            installerExitCode
+                ? `Installer exit code ${installerExitCode}`
+                : 'Vendor installer failed without a readable summary.'
+        );
+
+        let category = 'generic';
+        if (/cancelled by user|canceled by user|cancelado por el usuario|cancelada por el usuario/.test(normalized)) {
+            category = 'user-cancelled';
+        } else if (/access is denied|permiso denegado|acceso denegado/.test(normalized)) {
+            category = 'permission';
+        } else if (
+            /postgresql(?:ini)?|data directory|directorio de datos|cluster data/.test(normalized) ||
+            (id.startsWith('PostgreSQL.PostgreSQL.') && installerExitCode === '1')
+        ) {
+            category = 'postgres-config';
+        } else if (
+            /directory is not empty|directorio.+no esta vacio|already exists|ya existe|port.+in use|puerto.+en uso/.test(normalized)
+        ) {
+            category = 'existing-config';
+        }
+
+        const payload = JSON.stringify({
+            category,
+            ...(installerExitCode ? { installerExitCode } : {})
+        });
+        const installerError = new Error(`InstallerFailed:${payload}`) as Error & { technicalDetails?: string };
+        installerError.technicalDetails = technicalSummary;
+        return installerError;
+    }
+
     private async hasObsRelatedProcessRunning(): Promise<boolean> {
         try {
             const { stdout } = await execa(
@@ -604,20 +678,49 @@ export class WingetService {
 
         const runCmd = async (args: string[]) => {
             const subprocess = execa('winget', args, { all: true });
+            let lastActivityAt = Date.now();
+            let likelyDownloading = false;
+            let abortedForNetwork = false;
+
+            const handleOutput = (rawChunk: string) => {
+                lastActivityAt = Date.now();
+                const lines = rawChunk
+                    .split(/\r?\n|\r/g)
+                    .map(line => line.trim())
+                    .filter(Boolean);
+                for (const line of lines) {
+                    likelyDownloading = this.updateDownloadPhaseState(line, likelyDownloading);
+                }
+                this.emitWingetOutputToLog(rawChunk, onLog);
+            };
+
+            const watchdogId = setInterval(() => {
+                if (this.isOnline) return;
+                if (!likelyDownloading) return;
+                if (Date.now() - lastActivityAt < this.networkStallMs) return;
+
+                abortedForNetwork = true;
+                this.debug(`[WingetService] Aborting ${id} after network loss and stalled download.`);
+                try {
+                    subprocess.kill('SIGTERM');
+                } catch {
+                    // Best-effort cancellation only.
+                }
+            }, this.watchdogCheckMs);
 
             if (subprocess.all) {
                 subprocess.all.on('data', (data) => {
-                    this.emitWingetOutputToLog(data.toString(), onLog);
+                    handleOutput(data.toString());
                 });
             } else {
                 if (subprocess.stdout) {
                     subprocess.stdout.on('data', (data) => {
-                        this.emitWingetOutputToLog(data.toString(), onLog);
+                        handleOutput(data.toString());
                     });
                 }
                 if (subprocess.stderr) {
                     subprocess.stderr.on('data', (data) => {
-                        this.emitWingetOutputToLog(data.toString(), onLog);
+                        handleOutput(data.toString());
                     });
                 }
             }
@@ -625,6 +728,12 @@ export class WingetService {
             try {
                 await subprocess;
             } catch (error: unknown) {
+                clearInterval(watchdogId);
+                if (abortedForNetwork) {
+                    const networkError = new Error('NetworkInterrupted: Connection was lost during download and the installer was stopped to avoid hanging.') as Error & { technicalDetails?: string };
+                    networkError.technicalDetails = `No winget output for ${this.networkStallMs / 1000}s after network loss while download was in progress.`;
+                    throw networkError;
+                }
                 const wingetError = error as { exitCode?: number, message?: string, stdout?: string, stderr?: string };
                 const unsupportedCombined = this.buildWingetErrorCombinedText(wingetError);
                 if (args.includes('--include-unknown') && this.isIncludeUnknownUnsupported(unsupportedCombined)) {
@@ -652,6 +761,8 @@ export class WingetService {
                     throw new Error(`AppInUse: Could not update ${id} because it is currently running.`);
                 }
                 throw error;
+            } finally {
+                clearInterval(watchdogId);
             }
         };
 
@@ -681,6 +792,14 @@ export class WingetService {
                 wingetError.exitCode === 2316632081 ||
                 /installer hash does not match|el hash del instalador no coincide/i.test(combinedErrorText);
 
+            const isInstallerFailure =
+                wingetError.exitCode === 2316632070 ||
+                wingetError.exitCode === -1978335226 ||
+                /installer error with exit code|error del instalador con el codigo de salida/i.test(this.normalizeText(combinedErrorText));
+            const isNetworkInterrupted =
+                /download|descarg/.test(normalizedCombined) &&
+                /network|internet|offline|timeout|timed out|socket|econn|enotfound|connect|conexion|conexi[oó]n/.test(normalizedCombined);
+
             // File-in-use must rely on explicit signal text (exit code 6 is too generic and causes false positives).
             const isFileInUse =
                 /files modified by the installer are currently in use|otra aplicación está usando los archivos modificados|otra aplicacion esta usando los archivos modificados|file in use|archivo en uso|application is currently running|aplicaci[oó]n.*(en uso|ejecuci[oó]n)/i.test(normalizedCombined);
@@ -697,6 +816,17 @@ export class WingetService {
                 }
                 console.warn(`[WingetService] File in use for ${id}.`);
                 throw new Error(`AppInUse: The application is currently running. Please close it.`);
+            }
+
+            if (isNetworkInterrupted) {
+                const networkError = new Error('NetworkInterrupted: Connection was lost or became unstable during download.') as Error & { technicalDetails?: string };
+                networkError.technicalDetails = 'Winget output suggests a network-related download failure.';
+                throw networkError;
+            }
+
+            if (isInstallerFailure) {
+                console.warn(`[WingetService] Vendor installer failed for ${id}.`);
+                throw this.buildInstallerFailureError(id, combinedErrorText, wingetError.exitCode);
             }
 
             if (isInapplicable || isTechMismatch) {

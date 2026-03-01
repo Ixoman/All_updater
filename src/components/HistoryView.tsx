@@ -31,9 +31,9 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
         void loadHistory();
     }, []);
 
-    const handleClearHistory = async () => {
+    const handleFactoryReset = async () => {
         try {
-            await window.ipcRenderer.invoke('history:clear');
+            await window.ipcRenderer.invoke('system:factory-reset');
             setLanguage('en');
             setHistory([]);
             setShowClearConfirm(false);
@@ -132,7 +132,7 @@ export const HistoryView: React.FC<HistoryViewProps> = ({ onResetApp }) => {
                             {t('cancel')}
                         </button>
                         <button
-                            onClick={handleClearHistory}
+                            onClick={handleFactoryReset}
                             className="px-3 py-1.5 text-xs font-bold text-white bg-red-600 hover:bg-red-700 rounded-md shadow-sm transition-colors"
                         >
                             {t('confirm')}

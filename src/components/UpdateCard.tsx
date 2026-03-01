@@ -10,7 +10,6 @@ interface UpdateCardProps {
     isSelected: boolean;
     onToggle: () => void;
     releaseNotesUrl?: string | null;
-    isLoadingReleaseNotes?: boolean;
     onOpenReleaseNotes?: () => void;
     onIgnoreFor7Days?: () => void;
 }
@@ -20,7 +19,6 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
     isSelected,
     onToggle,
     releaseNotesUrl,
-    isLoadingReleaseNotes = false,
     onOpenReleaseNotes,
     onIgnoreFor7Days
 }) => {
@@ -36,7 +34,7 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
         normalizedInstalledVersion === '-';
     const isInapplicable = update.previousStatus === 'inapplicable';
     const isManualUninstall = update.previousDetails?.includes('Manual uninstall') || update.previousDetails?.includes('diferente');
-    const isReleaseNotesUnavailable = releaseNotesUrl === null;
+    const hasReleaseNotesUrl = typeof releaseNotesUrl === 'string' && releaseNotesUrl.length > 0;
 
     return (
         <motion.div
@@ -102,27 +100,16 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
                                 </div>
                             </div>
                             <div className="flex flex-wrap items-center gap-3">
-                                {onOpenReleaseNotes && (
+                                {hasReleaseNotesUrl && onOpenReleaseNotes && (
                                     <button
                                         type="button"
                                         onClick={(event) => {
                                             event.stopPropagation();
-                                            if (isLoadingReleaseNotes || isReleaseNotesUnavailable) return;
                                             onOpenReleaseNotes();
                                         }}
-                                        disabled={isLoadingReleaseNotes || isReleaseNotesUnavailable}
-                                        className={clsx(
-                                            "text-xs font-semibold underline decoration-dotted underline-offset-2 transition-colors",
-                                            isLoadingReleaseNotes || isReleaseNotesUnavailable
-                                                ? "cursor-default text-slate-500 dark:text-slate-400"
-                                                : "text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200"
-                                        )}
+                                        className="text-xs font-semibold underline decoration-dotted underline-offset-2 transition-colors text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200"
                                     >
-                                        {isLoadingReleaseNotes
-                                            ? t('releaseNotesLoading')
-                                            : isReleaseNotesUnavailable
-                                                ? t('releaseNotesUnavailableShort')
-                                                : t('releaseNotes')}
+                                        {t('releaseNotes')}
                                     </button>
                                 )}
                                 {onIgnoreFor7Days && (

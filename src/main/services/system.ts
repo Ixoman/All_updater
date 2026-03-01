@@ -1,8 +1,10 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { app, shell } from 'electron';
-import type { DataFolderStatus } from '../../shared/types';
+import electron from 'electron';
+import type { DataFolderStatus } from '../../shared/types.js';
+
+const { app, shell } = electron;
 
 export interface SystemInfo {
     platform: string;

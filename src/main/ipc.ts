@@ -1,4 +1,6 @@
-import { ipcMain, shell } from 'electron';
+import { app, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WingetService } from './services/winget.js';
 import { SystemRestoreService } from './services/restore.js';
 import { SettingsService, type UserSettings } from './services/settings.js';
@@ -9,19 +11,31 @@ import { AppUpdateService } from './services/app-update.js';
 import { PreflightService } from './services/preflight.js';
 import { DiagnosticsService } from './services/diagnostics.js';
 import { IgnoreService } from './services/ignore.js';
+import { assertWithinIpcRateLimit, pruneExpiredIpcRateLimits, type IpcRateLimitConfig } from './ipc-rate-limit.js';
 import type { HistoryItem } from '../shared/types.js';
 import log from 'electron-log/main'; // Import directly to access transport
 
 const historyService = new HistoryService();
-const wingetService = new WingetService(new SystemService(), historyService);
 const restoreService = new SystemRestoreService();
 const settingsService = new SettingsService();
 const logger = new LoggerService();
 const systemService = new SystemService();
+const wingetService = new WingetService(systemService, historyService);
 const appUpdateService = new AppUpdateService();
 const preflightService = new PreflightService();
 const diagnosticsService = new DiagnosticsService(logger);
 const ignoreService = new IgnoreService();
+const approvedRendererPaths = new Set<string>();
+const ipcRateLimitState = new Map<string, { windowStartedAt: number; count: number }>();
+
+const IPC_RATE_LIMITS = {
+    wingetCheckUpdates: { windowMs: 5000, maxCalls: 2 },
+    wingetGetHealth: { windowMs: 5000, maxCalls: 6 },
+    systemCheckDataFolder: { windowMs: 5000, maxCalls: 12 },
+    systemCheckAppUpdate: { windowMs: 10000, maxCalls: 4 },
+    systemRunPreflight: { windowMs: 10000, maxCalls: 3 },
+    systemExportDiagnostics: { windowMs: 30000, maxCalls: 2 }
+} satisfies Record<string, IpcRateLimitConfig>;
 
 const settingKeys: readonly (keyof UserSettings)[] = [
     'theme',
@@ -67,11 +81,69 @@ function setSettingSafely(key: keyof UserSettings, value: unknown): void {
     throw new Error(`Invalid value for setting ${key}`);
 }
 
+function normalizePathForPolicy(targetPath: string): string {
+    const resolved = path.resolve(targetPath);
+    try {
+        return fs.realpathSync.native(resolved);
+    } catch {
+        return resolved;
+    }
+}
+
+function isPathInside(parentPath: string, targetPath: string): boolean {
+    const relative = path.relative(parentPath, targetPath);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function registerApprovedRendererPath(targetPath?: string): void {
+    if (!targetPath || typeof targetPath !== 'string') return;
+    const normalized = normalizePathForPolicy(targetPath);
+    approvedRendererPaths.add(normalized);
+
+    try {
+        const stat = fs.statSync(normalized);
+        if (stat.isFile()) {
+            approvedRendererPaths.add(path.dirname(normalized));
+        }
+    } catch {
+        approvedRendererPaths.add(path.dirname(normalized));
+    }
+}
+
+function assertSafeRendererPath(targetPath: string): string {
+    if (!targetPath || typeof targetPath !== 'string') {
+        throw new Error('Invalid path.');
+    }
+
+    const normalizedTarget = normalizePathForPolicy(targetPath);
+    const userDataPath = normalizePathForPolicy(app.getPath('userData'));
+    if (isPathInside(userDataPath, normalizedTarget)) {
+        return normalizedTarget;
+    }
+
+    if (approvedRendererPaths.has(normalizedTarget)) {
+        return normalizedTarget;
+    }
+
+    throw new Error('Path is outside allowed local app locations.');
+}
+
+function enforceIpcRateLimit(
+    event: IpcMainInvokeEvent,
+    channel: string,
+    config: IpcRateLimitConfig
+): void {
+    const key = `${event.sender.id}:${channel}`;
+    pruneExpiredIpcRateLimits(ipcRateLimitState, config.windowMs);
+    assertWithinIpcRateLimit(ipcRateLimitState, key, config);
+}
+
 export function setupIPC() {
     console.log('[IPC] Setting up IPC handlers...');
 
     // Winget
-    ipcMain.handle('winget:check-updates', async () => {
+    ipcMain.handle('winget:check-updates', async (event) => {
+        enforceIpcRateLimit(event, 'winget:check-updates', IPC_RATE_LIMITS.wingetCheckUpdates);
         console.log('[IPC] winget:check-updates handler called');
         logger.info('Checking for updates...');
         return await wingetService.getAvailableUpdates();
@@ -81,9 +153,21 @@ export function setupIPC() {
 
     ipcMain.handle('winget:install-update', async (event, id: string) => {
         logger.info(`Installing update for ${id}`);
-        return await wingetService.installUpdate(id, (logLine) => {
-            event.sender.send('winget:log', logLine);
-        });
+        try {
+            return await wingetService.installUpdate(id, (logLine) => {
+                event.sender.send('winget:log', logLine);
+            });
+        } catch (error) {
+            const typedError = error as Error & { technicalDetails?: string };
+            const errorMessage = typedError?.message || String(error);
+            const technicalDetails = typedError?.technicalDetails;
+            logger.error(
+                technicalDetails
+                    ? `Install failed for ${id}: ${errorMessage} | details: ${technicalDetails}`
+                    : `Install failed for ${id}: ${errorMessage}`
+            );
+            throw error;
+        }
     });
 
     ipcMain.handle('winget:get-release-notes-url', async (_, id: string) => {
@@ -93,8 +177,13 @@ export function setupIPC() {
         return await wingetService.getReleaseNotesUrl(id);
     });
 
-    ipcMain.handle('winget:get-health', async () => {
+    ipcMain.handle('winget:get-health', async (event) => {
+        enforceIpcRateLimit(event, 'winget:get-health', IPC_RATE_LIMITS.wingetGetHealth);
         return await wingetService.getHealth();
+    });
+
+    ipcMain.handle('system:set-online-state', async (_, isOnline: boolean) => {
+        wingetService.setOnlineState(Boolean(isOnline));
     });
 
     // System Restore
@@ -172,7 +261,8 @@ export function setupIPC() {
         return (await import('electron')).app.getPath('userData');
     });
 
-    ipcMain.handle('system:check-data-folder', async () => {
+    ipcMain.handle('system:check-data-folder', async (event) => {
+        enforceIpcRateLimit(event, 'system:check-data-folder', IPC_RATE_LIMITS.systemCheckDataFolder);
         return systemService.checkUserDataWritable();
     });
 
@@ -184,17 +274,13 @@ export function setupIPC() {
     });
 
     ipcMain.handle('system:show-item-in-folder', async (_, targetPath: string) => {
-        if (!targetPath || typeof targetPath !== 'string') {
-            throw new Error('Invalid path.');
-        }
-        await shell.showItemInFolder(targetPath);
+        const safePath = assertSafeRendererPath(targetPath);
+        await shell.showItemInFolder(safePath);
     });
 
     ipcMain.handle('system:open-path', async (_, targetPath: string) => {
-        if (!targetPath || typeof targetPath !== 'string') {
-            throw new Error('Invalid path.');
-        }
-        const error = await shell.openPath(targetPath);
+        const safePath = assertSafeRendererPath(targetPath);
+        const error = await shell.openPath(safePath);
         if (error) {
             throw new Error(error);
         }
@@ -208,30 +294,44 @@ export function setupIPC() {
         await systemService.openServicesConsole();
     });
 
-    ipcMain.handle('system:check-app-update', async () => {
+    ipcMain.handle('system:check-app-update', async (event) => {
+        enforceIpcRateLimit(event, 'system:check-app-update', IPC_RATE_LIMITS.systemCheckAppUpdate);
         logger.info('Checking for app updates (GitHub release)...');
         return await appUpdateService.checkLatestVersion();
     });
 
     ipcMain.handle('system:download-app-update', async (event, assetUrl: string, fileName: string, expectedSha256?: string) => {
         logger.info(`Downloading app update asset: ${fileName}`);
-        return await appUpdateService.downloadUpdateAsset(event.sender, assetUrl, fileName, expectedSha256);
+        const result = await appUpdateService.downloadUpdateAsset(event.sender, assetUrl, fileName, expectedSha256);
+        if (result.filePath) {
+            registerApprovedRendererPath(result.filePath);
+        }
+        return result;
     });
 
-    ipcMain.handle('system:run-preflight', async () => {
+    ipcMain.handle('system:run-preflight', async (event) => {
+        enforceIpcRateLimit(event, 'system:run-preflight', IPC_RATE_LIMITS.systemRunPreflight);
         logger.info('Running preflight checks...');
         return await preflightService.run();
     });
 
-    ipcMain.handle('system:export-diagnostics', async () => {
+    ipcMain.handle('system:export-diagnostics', async (event) => {
+        enforceIpcRateLimit(event, 'system:export-diagnostics', IPC_RATE_LIMITS.systemExportDiagnostics);
         logger.info('Exporting diagnostics package...');
-        return await diagnosticsService.exportDiagnostics();
+        const result = await diagnosticsService.exportDiagnostics();
+        if (result.filePath) {
+            registerApprovedRendererPath(result.filePath);
+        }
+        return result;
     });
 
     // History
     ipcMain.handle('history:get', async () => historyService.getHistory());
     ipcMain.handle('history:add', async (_, entry: Omit<HistoryItem, 'date'>) => historyService.addEntry(entry));
     ipcMain.handle('history:clear', async () => {
+        historyService.clearHistory();
+    });
+    ipcMain.handle('system:factory-reset', async () => {
         historyService.clearHistory();
         ignoreService.clearAll();
         settingsService.set('language', 'en');

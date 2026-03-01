@@ -1,7 +1,7 @@
 {
   "name": "all-updater",
   "private": true,
-  "version": "1.0.6",
+  "version": "1.0.7",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
@@ -23,8 +23,11 @@
     "preview": "vite preview",
     "typecheck:app": "tsc -p tsconfig.app.json --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit",
+    "test": "npm run test:unit",
+    "test:unit": "tsc -p tsconfig.tests.json && node --experimental-specifier-resolution=node ./scripts/test/run-unit-tests.mjs unit",
+    "test:integration": "tsc -p tsconfig.tests.json && node --experimental-specifier-resolution=node ./scripts/test/run-unit-tests.mjs integration",
     "verify": "npm run lint && npm run typecheck:app && npm run typecheck:electron",
-    "test:regression": "npm run verify"
+    "test:regression": "npm run verify && npm run test:unit && npm run test:integration"
   },
   "build": {
     "appId": "com.antigravity.allupdater",

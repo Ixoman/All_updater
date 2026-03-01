@@ -41,6 +41,7 @@ export interface IElectronAPI {
     invoke(channel: 'system:open-logs'): Promise<void>;
     invoke(channel: 'system:is-elevated'): Promise<boolean>;
     invoke(channel: 'system:get-info'): Promise<SystemInfo>;
+    invoke(channel: 'system:set-online-state', isOnline: boolean): Promise<void>;
     invoke<K extends keyof SettingsMap>(channel: 'settings:get', key: K): Promise<SettingsMap[K]>;
     invoke<K extends keyof SettingsMap>(channel: 'settings:set', key: K, value: SettingsMap[K]): Promise<void>;
     invoke(channel: 'system:set-operation-active', active: boolean): Promise<void>;
@@ -57,6 +58,7 @@ export interface IElectronAPI {
     invoke(channel: 'history:get'): Promise<HistoryItem[]>;
     invoke(channel: 'history:add', entry: Omit<HistoryItem, 'date'>): Promise<void>;
     invoke(channel: 'history:clear'): Promise<void>;
+    invoke(channel: 'system:factory-reset'): Promise<void>;
     invoke(channel: 'ignore:get-active'): Promise<IgnoreRule[]>;
     invoke(channel: 'ignore:add-temporary', id: string, availableVersion: string | undefined, days: number): Promise<IgnoreRule>;
     invoke(channel: 'system:get-userdata-path'): Promise<string>;

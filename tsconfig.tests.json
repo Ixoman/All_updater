@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "outDir": ".tmp-tests",
+    "rootDir": ".",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "noEmit": false
+  },
+  "include": [
+    "src/utils/app-helpers.ts",
+    "src/main/ipc-rate-limit.ts",
+    "tests/**/*.ts"
+  ]
+}
