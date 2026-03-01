@@ -27,8 +27,8 @@ Esta versión se enfoca en mantenibilidad, trazabilidad y validación, sin cambi
 - Suite local de regresión limpia (`unit` + `integration`).
 
 ### Estado de publicación
-- El código queda preparado para `v1.0.7`.
-- El artefacto de distribución firmado sigue bloqueado hasta configurar el certificado de firma requerido por la política del proyecto.
+- `v1.0.7` se publica de forma temporal sin firma digital por decisión explícita del responsable del proyecto.
+- La firma seguirá siendo el objetivo para futuras versiones cuando el certificado esté disponible.
 
 ## EN
 This release focuses on maintainability, traceability, and validation while preserving the app's non-invasive philosophy.
@@ -57,5 +57,5 @@ This release focuses on maintainability, traceability, and validation while pres
 - Clean local regression suite (`unit` + `integration`).
 
 ### Release status
-- Code is prepared for `v1.0.7`.
-- Signed distribution artifacts are still blocked until the required signing certificate is configured under project policy.
+- `v1.0.7` is being published temporarily without a digital signature by explicit project-owner decision.
+- Signed distribution remains the target for future versions once the certificate is available.
