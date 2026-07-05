@@ -44,14 +44,16 @@ export interface IElectronAPI {
     invoke(channel: 'system:set-online-state', isOnline: boolean): Promise<void>;
     invoke<K extends keyof SettingsMap>(channel: 'settings:get', key: K): Promise<SettingsMap[K]>;
     invoke<K extends keyof SettingsMap>(channel: 'settings:set', key: K, value: SettingsMap[K]): Promise<void>;
-    invoke(channel: 'system:set-operation-active', active: boolean): Promise<void>;
+    invoke(channel: 'system:begin-operation'): Promise<string>;
+    invoke(channel: 'system:end-operation', token: string): Promise<void>;
     invoke(channel: 'system:open-url', url: string): Promise<void>;
     invoke(channel: 'system:show-item-in-folder', targetPath: string): Promise<void>;
     invoke(channel: 'system:open-path', targetPath: string): Promise<void>;
     invoke(channel: 'system:open-system-restore'): Promise<void>;
     invoke(channel: 'system:open-services-console'): Promise<void>;
     invoke(channel: 'system:check-app-update'): Promise<AppVersionCheckResult>;
-    invoke(channel: 'system:download-app-update', assetUrl: string, fileName: string, expectedSha256?: string): Promise<AppUpdateDownloadResult>;
+    invoke(channel: 'system:download-app-update'): Promise<AppUpdateDownloadResult>;
+    invoke(channel: 'system:cancel-app-update-download'): Promise<boolean>;
     invoke(channel: 'system:run-preflight'): Promise<PreflightResult>;
     invoke(channel: 'system:export-diagnostics'): Promise<DiagnosticsExportResult>;
     invoke(channel: 'system:check-data-folder'): Promise<DataFolderStatus>;

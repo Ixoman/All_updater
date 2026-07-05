@@ -6,6 +6,8 @@ import { useLanguage } from '../context/LanguageContext';
 interface TroubleshootingModalProps {
     isOpen: boolean;
     onClose: () => void;
+    userDataPath?: string | null;
+    onOpenLogs?: () => void;
 }
 
 interface TroubleshootingItem {
@@ -13,7 +15,7 @@ interface TroubleshootingItem {
     steps: string[];
 }
 
-export const TroubleshootingModal: React.FC<TroubleshootingModalProps> = ({ isOpen, onClose }) => {
+export const TroubleshootingModal: React.FC<TroubleshootingModalProps> = ({ isOpen, onClose, userDataPath, onOpenLogs }) => {
     const { language, t } = useLanguage();
     const closeRef = useRef<HTMLButtonElement>(null);
 
@@ -141,11 +143,11 @@ export const TroubleshootingModal: React.FC<TroubleshootingModalProps> = ({ isOp
                     initial={{ opacity: 0, scale: 0.96 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.96 }}
-                    className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl dark:bg-slate-900 border border-white/10 overflow-hidden"
+                    className="w-full max-w-3xl overflow-hidden rounded-lg border border-white/10 bg-white shadow-2xl dark:bg-slate-900"
                 >
-                    <div className="relative bg-gradient-to-r from-slate-800 to-slate-700 p-6 text-white">
+                    <div className="relative bg-slate-900 p-5 text-white">
                         <div className="flex items-center gap-3">
-                            <Wrench className="h-8 w-8 text-white/90" />
+                            <Wrench className="h-6 w-6 text-white/90" />
                             <h2 className="text-xl font-bold">{t('troubleshootingTitle')}</h2>
                         </div>
                         <button onClick={onClose} className="absolute top-4 right-4 rounded-full bg-white/20 p-1 hover:bg-white/30 text-white">
@@ -153,7 +155,7 @@ export const TroubleshootingModal: React.FC<TroubleshootingModalProps> = ({ isOp
                         </button>
                     </div>
 
-                    <div className="p-6 space-y-3 max-h-[70vh] overflow-y-auto">
+                    <div className="max-h-[70vh] space-y-3 overflow-y-auto p-5">
                         {items.map((item) => (
                             <div key={item.title} className="rounded-lg border border-slate-300 bg-slate-100 p-4 dark:border-white/10 dark:bg-white/5">
                                 <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-2">{item.title}</h3>
@@ -164,6 +166,24 @@ export const TroubleshootingModal: React.FC<TroubleshootingModalProps> = ({ isOp
                                 </ul>
                             </div>
                         ))}
+
+                        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-xs dark:border-blue-500/15 dark:bg-blue-900/10">
+                            <p className="font-bold text-blue-900 dark:text-blue-300">{t('dataTransparencyTitle')}</p>
+                            <p className="mt-1 font-medium leading-relaxed text-slate-800 dark:text-sky-100">
+                                {t('dataTransparency')}
+                            </p>
+                            <code className="mt-2 block w-full break-all rounded border border-blue-200 bg-white px-2 py-1.5 font-mono text-[10px] text-slate-800 dark:border-transparent dark:bg-black/20 dark:text-sky-100">
+                                {userDataPath || '...'}
+                            </code>
+                            {onOpenLogs && (
+                                <button
+                                    onClick={onOpenLogs}
+                                    className="mt-2 rounded border border-blue-200 bg-white px-2 py-1.5 text-[11px] font-bold text-blue-700 transition-colors hover:bg-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-blue-300 dark:hover:bg-white/10"
+                                >
+                                    {t('openLogs')}
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     <div className="border-t border-slate-300 p-4 dark:border-white/10">

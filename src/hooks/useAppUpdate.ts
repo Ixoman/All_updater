@@ -67,7 +67,7 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
     }, [addToast, t]);
 
     const downloadAppUpdate = useCallback(async () => {
-        if (!appUpdateInfo?.assetUrl || !appUpdateInfo.assetName) {
+        if (!appUpdateInfo?.canDownload || !appUpdateInfo.assetName) {
             addToast(t('appUpdateMissingAsset'), 'warning');
             return;
         }
@@ -77,12 +77,7 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
         setLastDownloadedUpdatePath(null);
         setDownloadGuideState(null);
         try {
-            const result = await window.ipcRenderer.invoke(
-                'system:download-app-update',
-                appUpdateInfo.assetUrl,
-                appUpdateInfo.assetName,
-                appUpdateInfo.assetSha256
-            );
+            const result = await window.ipcRenderer.invoke('system:download-app-update');
 
             if (result.canceled) {
                 addToast(t('appUpdateDownloadCanceled'), 'info');
@@ -102,6 +97,11 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
                 } else {
                     addToast(t('appUpdateHashUnavailable'), 'warning');
                 }
+                if (result.signatureVerified) {
+                    addToast(t('appUpdateSignatureVerified'), 'success');
+                } else if (result.signatureStatus === 'unsigned' || result.signatureStatus === 'unknown') {
+                    addToast(t('appUpdateSignatureUnsigned'), 'warning');
+                }
                 addToast(isZip ? t('appUpdateAfterDownloadZip') : t('appUpdateAfterDownloadExe'), 'warning');
                 return;
             }
@@ -109,6 +109,14 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
             console.error('[useAppUpdate] App update download failed:', result.error);
             if ((result.error || '').includes('HashMismatch')) {
                 addToast(t('appUpdateHashMismatch'), 'error');
+                return;
+            }
+            if ((result.error || '').includes('SignatureInvalid')) {
+                addToast(t('appUpdateSignatureInvalid'), 'error');
+                return;
+            }
+            if ((result.error || '').includes('InsufficientDiskSpace')) {
+                addToast(t('appUpdateInsufficientSpace'), 'error');
                 return;
             }
             addToast(t('appUpdateDownloadFailed'), 'error');
@@ -123,6 +131,14 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
 
     const closeDownloadGuide = useCallback(() => {
         setDownloadGuideState(null);
+    }, []);
+
+    const cancelAppUpdateDownload = useCallback(async () => {
+        try {
+            await window.ipcRenderer.invoke('system:cancel-app-update-download');
+        } catch (error) {
+            console.error('[useAppUpdate] Failed to cancel app update download:', error);
+        }
     }, []);
 
     useEffect(() => {
@@ -150,6 +166,7 @@ export function useAppUpdate({ addToast, t }: UseAppUpdateParams) {
         runInitialAppVersionCheck,
         checkAppUpdate,
         downloadAppUpdate,
+        cancelAppUpdateDownload,
         closeDownloadGuide
     };
 }

@@ -1,481 +1,130 @@
-UG 1 — Inyección de comandos en PowerShell
-                                                                                                                                                                                                                                                  
-  Severidad: CRÍTICA
-  Archivo: src/main/services/restore.ts:12-15
-  Tipo: Seguridad
-
-  El código actual:
-  const fullDescription = `${description} (${timestamp})`;
-  await execa('powershell', [
-      '-Command',
-      `Checkpoint-Computer -Description "${fullDescription}" ...`
-  ]);
-
-  Qué pasa:
-  Todo el comando de PowerShell se pasa como un solo string al argumento -Command. Dentro de ese string, fullDescription se interpola directamente entre comillas dobles. En PowerShell, las comillas dobles permiten la expansión de variables y 
-  subexpresiones.
-
-  Si description o timestamp contienen caracteres especiales como ", `, $(), o $(...), PowerShell los interpreta como código ejecutable. Por ejemplo, si un locale genera un timestamp como 14/02/2026, 7:00 "PM", las comillas rompen la
-  sintaxis. Peor aún: un valor malicioso como "; Remove-Item C:\\ -Recurse -Force; " se ejecutaría como comando de sistema.
-
-  Por qué es crítico:
-  La app se ejecuta obligatoriamente como Administrador. Cualquier inyección se ejecuta con privilegios elevados, sin restricción.
-
-  Impacto actual:
-  Hoy el description viene hardcodeado como "All Updater Auto-Restore" desde App.tsx:156, así que el riesgo inmediato es bajo. Pero new Date().toLocaleString() en algunos locales puede generar strings con comillas, y si en el futuro el       
-  description se vuelve configurable, es un vector de ataque directo.
-
-  Cómo arreglarlo:
-  Usar comillas simples de PowerShell (que no expanden) o escapear el string, o mejor aún, pasar el description como argumento separado y construir el comando de forma segura:
-  // Opción segura: comillas simples de PowerShell (no expanden variables)
-  `Checkpoint-Computer -Description '${fullDescription.replace(/'/g, "''")}' ...`
-
-  ---
-  BUG 2 — setupIPC() se ejecuta antes de app.whenReady()
-
-  Severidad: CRÍTICA
-  Archivo: electron/main.ts:100-116
-  Tipo: Ciclo de vida / Inicialización
-
-  El código actual:
-  import { setupIPC } from '../src/main/ipc.js';
-  setupIPC();                          // ← Línea 102: se ejecuta INMEDIATAMENTE
-
-  app.whenReady().then(async () => {   // ← Línea 104: ready viene DESPUÉS
-      // ...
-      createWindow();
-  });
-
-  Qué pasa:
-  setupIPC() en ipc.ts:10-16 crea instancias de todos los servicios:
-  const historyService = new HistoryService();   // usa electron-store → necesita userData path
-  const settingsService = new SettingsService();  // usa electron-store → necesita userData path
-  const logger = new LoggerService();             // usa app.getPath('documents')
-
-  electron-store internamente llama a app.getPath('userData') en su constructor. Según la documentación de Electron, app.getPath() no es confiable antes de que el evento ready se emita. En el main process de Electron, el app necesita
-  inicializar su infraestructura interna primero.
-
-  Además, en electron/main.ts:14-17, tú redefiniste userData para modo portable:
-  if (app.isPackaged) {
-      const portableDataPath = path.join(path.dirname(app.getPath('exe')), 'data');
-      app.setPath('userData', portableDataPath);
-  }
-
-  Esto se ejecuta a nivel de módulo (antes de whenReady), pero setupIPC() también se ejecuta a nivel de módulo. El orden de ejecución depende del orden de las líneas, pero hay una race condition lógica: si electron-store cachea la ruta antes 
-  de que setPath se ejecute, los datos se guardarían en la ruta equivocada.
-
-  Impacto:
-  - En desarrollo funciona por suerte porque el userData default existe
-  - En producción portable, los settings y el historial podrían guardarse en una ubicación incorrecta o no encontrarse
-  - Si Electron cambia el comportamiento de getPath pre-ready en futuras versiones, la app crashea al iniciar
-
-  Cómo arreglarlo:
-  Mover setupIPC() dentro de app.whenReady():
-  app.whenReady().then(async () => {
-      const isElevated = await ensureElevated();
-      if (!isElevated) { /* ... */ }
-      setupIPC();       // ← DESPUÉS de ready
-      createWindow();
-  });
-
-  ---
-  BUG 3 — Patrón frágil de cierre recursivo
-
-  Severidad: MEDIA
-  Archivo: electron/main.ts:50-68
-  Tipo: Lógica / Estabilidad
-
-  El código actual:
-  win.on('close', (e) => {
-      if (isOperationActive) {
-          e.preventDefault();
-          const choice = dialog.showMessageBoxSync(win!, { ... });
-          if (choice === 1) {
-              isOperationActive = false;
-              win?.close();   // ← Esto RE-DISPARA el evento 'close'
-          }
-      }
-  });
-
-  Qué pasa:
-  Cuando el usuario elige "Close Anyway", se pone isOperationActive = false y se llama win?.close(). Pero close() re-emite el evento close, así que el handler se ejecuta de nuevo. Funciona porque isOperationActive ya es false, así que la     
-  segunda vez el if no entra y el cierre procede normalmente.
-
-  Por qué es un problema:
-  - Si alguien agrega lógica adicional al handler close fuera del if (por ejemplo, logging, cleanup, guardar estado), esa lógica se ejecutará dos veces
-  - Es un patrón que confunde a cualquier desarrollador que lea el código, porque no es obvio que el cierre es intencionalmente recursivo
-  - Si hay un bug que vuelve a poner isOperationActive = true entre el set y el close (por ejemplo, un IPC que llega justo en ese instante), el diálogo aparece de nuevo, creando un loop infinito de diálogos
-
-  Cómo arreglarlo:
-  Usar un flag explícito de "forzar cierre":
-  let forceClose = false;
-
-  win.on('close', (e) => {
-      if (forceClose) return; // Dejar cerrar
-      if (isOperationActive) {
-          e.preventDefault();
-          const choice = dialog.showMessageBoxSync(win!, { ... });
-          if (choice === 1) {
-              forceClose = true;
-              win?.close();
-          }
-      }
-  });
-
-  ---
-  BUG 4 — "Select All" muestra estado incorrecto con updates inapplicables
-
-  Severidad: MEDIA
-  Archivo: src/App.tsx:434 vs src/App.tsx:130-138
-  Tipo: Lógica de UI
-
-  El código del checkbox visual:
-  // Línea 434: Comparación para mostrar el icono
-  {selectedIds.size === updates.length ? (
-      <CheckSquare />    // ← Check marcado
-  ) : (
-      <Square />         // ← Check vacío
-  )}
-
-  El código del toggle:
-  // Línea 130-138: Lógica de selección
-  const toggleSelectAll = () => {
-      const selectableUpdates = updates.filter(u => u.previousStatus !== 'inapplicable');
-      if (selectedIds.size === selectableUpdates.length) {
-          setSelectedIds(new Set());
-      } else {
-          setSelectedIds(new Set(selectableUpdates.map(u => u.id)));
-      }
-  };
-
-  Qué pasa:
-  Supón que tienes 10 updates totales: 8 normales + 2 inapplicables.
-  1. toggleSelectAll() correctamente solo selecciona las 8 normales
-  2. selectedIds.size = 8
-  3. La comparación visual es 8 === 10 → false
-  4. El checkbox siempre muestra vacío aunque todas las seleccionables están seleccionadas
-
-  El usuario ve todas las tarjetas normales con check azul, pero el botón "Select All" aparece como si nada estuviera seleccionado. Al hacer click, como la lógica interna sí detecta que 8 === 8, deselecciona todo, lo cual es contraintuitivo. 
-
-  Cómo arreglarlo:
-  const selectableUpdates = updates.filter(u => u.previousStatus !== 'inapplicable');
-  {selectedIds.size === selectableUpdates.length && selectableUpdates.length > 0 ? (
-      <CheckSquare />
-  ) : (
-      <Square />
-  )}
-
-  ---
-  BUG 5 — Barra de progreso puede desincronizarse
-
-  Severidad: MENOR
-  Archivo: src/App.tsx:271-276
-  Tipo: Lógica de UI
-
-  El código actual:
-  // Dentro del while loop, DESPUÉS del try/catch:
-  current++;
-  setInstallProgress({ current, total });
-  i++;
-
-  Qué pasa:
-  El current++ ocurre incondicionalmente después del try/catch, tanto si la instalación fue éxito como si falló. Eso en sí está bien. El problema sutil es:
-
-  1. Cuando la primera app empieza a instalarse, el progreso muestra 0/N (porque current empieza en 0 y no se incrementa hasta que termina)
-  2. Si el await window.ipcRenderer.invoke('winget:install-update', id) lanza un error no previsto (por ejemplo, un error de red, un timeout del IPC, o un error de serialización), el error se propaga fuera del catch principal de la línea 239,
-   y current++ nunca se ejecuta. El while loop se rompe, y la barra de progreso queda congelada en el último valor.
-
-  Además, el overlay de instalación muestra:
-  style={{ width: `${((installProgress?.current || 0) / (installProgress?.total || 1)) * 100}%` }}
-
-  Si current supera a total por algún edge case (por ejemplo, un retry que re-añade al queue), la barra excedería el 100%.
-
-  Impacto real: Bajo, porque el catch en línea 239 atrapa la mayoría de errores. Pero un timeout de IPC o error de serialización no sería atrapado ahí.
-
-  ---
-  BUG 6 — isOperationActive no se resetea al fallar el restore point
-
-  Severidad: MEDIA-ALTA
-  Archivo: src/App.tsx:146-168
-  Tipo: Estado / UX bloqueante
-
-  El código actual:
-  const processUpdates = async (createRestore: boolean) => {
-      setShowRestoreModal(false);
-      setIsInstalling(true);
-      setBatchResults([]);
-      await window.ipcRenderer.invoke('system:set-operation-active', true);  // ← Se activa
-
-      if (createRestore) {
-          setIsCreatingRestore(true);
-          try {
-              const success = await window.ipcRenderer.invoke('system:create-restore-point', ...);
-              if (!success) throw new Error("System Restore failed");
-          } catch (e) {
-              console.error("Failed to create restore point", e);
-              addToast(t('restoreFailedAbort'), "error");
-              setIsCreatingRestore(false);
-              setCurrentLogLine(null);
-              return;    // ← SALE AQUÍ
-          } finally {
-              setIsCreatingRestore(false);
-          }
-      }
-      // ... instalación ...
-      await window.ipcRenderer.invoke('system:set-operation-active', false);  // ← Solo se resetea aquí
-  };
-
-  Qué pasa:
-  1. El usuario elige "Create & Update"
-  2. Se ejecuta system:set-operation-active(true) → en main process, isOperationActive = true
-  3. El restore point falla (PowerShell error, timeout, permisos, etc.)
-  4. Se muestra toast de error y se hace return
-  5. Nunca se ejecuta system:set-operation-active(false)
-
-  Consecuencia directa:
-  A partir de ese momento, cada vez que el usuario intente cerrar la ventana, aparece el diálogo de "Operation in Progress" que dice "An application update or restore point is currently in progress...". El usuario está atrapado en la
-  aplicación sin forma de cerrarla normalmente. Tiene que ir al Task Manager para matarla o elegir "Close Anyway (Dangerous)".
-
-  Además, setIsInstalling(true) se ejecutó pero nunca se pone en false en esa ruta de código, así que el overlay de "Installing Updates" también podría quedar visible (aunque setIsCreatingRestore(false) en el finally lo mitiga parcialmente). 
-
-  Cómo arreglarlo:
-  Añadir cleanup antes del return:
-  } catch (e) {
-      addToast(t('restoreFailedAbort'), "error");
-      setIsCreatingRestore(false);
-      setIsInstalling(false);          // ← Añadir
-      setCurrentLogLine(null);
-      await window.ipcRenderer.invoke('system:set-operation-active', false);  // ← Añadir
-      return;
-  }
-
-  ---
-  BUG 7 — Typo en traducción al español
-
-  Severidad: MENOR
-  Archivo: src/shared/translations.ts:224
-  Tipo: Cosmético / i18n
-
-  El código actual:
-  scanningBody: "Escanenando las profundidades de tu PC...",
-
-  Lo correcto:
-  scanningBody: "Escaneando las profundidades de tu PC...",
-
-  Se ve directamente en la pantalla de carga cuando el usuario busca actualizaciones en español. Es la primera impresión del usuario con la app.
-
-  ---
-  BUG 8 — El botón "Get Winget" no abre ninguna URL
-
-  Severidad: MEDIA
-  Archivo: src/App.tsx:357
-  Tipo: Funcionalidad rota
-
-  El código actual:
-  <button
-      onClick={() => window.ipcRenderer.invoke('settings:set', 'open-url', 'https://aka.ms/getwinget')}
-      className="..."
-  >
-      {t('getWinget')}
-  </button>
-
-  Qué pasa:
-  Se invoca settings:set con key 'open-url' y value 'https://aka.ms/getwinget'. Pero el handler en ipc.ts:49 es:
-  ipcMain.handle('settings:set', (_, key: string, value: any) => settingsService.set(key as any, value));
-
-  Esto llama a settingsService.set('open-url', 'https://...'). Dentro de SettingsService, el store tiene un schema tipado con UserSettings:
-  interface UserSettings {
-      theme: 'dark' | 'light' | 'system';
-      language: 'en' | 'es';
-      dontShowRestoreWarning: boolean;
-      fontSize: 'small' | 'medium' | 'large';
-      hasSeenOnboarding: boolean;
-  }
-
-  'open-url' no existe en el schema. electron-store con schema activado rechaza keys no definidas y lanza un error de validación. El error se propaga como un rejection del IPC invoke, pero el código del botón no tiene .catch(), así que el    
-  error se pierde silenciosamente.
-
-  Resultado: El usuario hace click en "Get Winget", no pasa absolutamente nada. Ni se abre la URL, ni se muestra un error. Para el usuario que necesita instalar winget, la app es un callejón sin salida.
-
-  Cómo arreglarlo:
-  Crear un handler IPC dedicado:
-  // En ipc.ts
-  ipcMain.handle('system:open-url', async (_, url: string) => {
-      await shell.openExternal(url);
-  });
-
-  // En App.tsx
-  onClick={() => window.ipcRenderer.invoke('system:open-url', 'https://aka.ms/getwinget')}
-
-  ---
-  BUG 9 — Memory leak: listener de winget:log nunca se remueve
-
-  Severidad: MEDIA
-  Archivo: src/App.tsx:43-51 + electron/preload.ts:7-10
-  Tipo: Memory leak
-
-  El código del preload:
-  contextBridge.exposeInMainWorld('ipcRenderer', {
-      on(...args: Parameters<typeof ipcRenderer.on>) {
-          const [channel, listener] = args
-          return ipcRenderer.on(channel, (event, ...args) => listener(event, ...args))
-          //                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-          //                              Función anónima NUEVA — no es `listener`
-      },
-      off(...args: Parameters<typeof ipcRenderer.off>) {
-          const [channel, listener] = args
-          return ipcRenderer.off(channel, listener)
-          //                              ^^^^^^^^
-          //                              Intenta remover `listener` original
-      },
-  });
-
-  El código del renderer:
-  useEffect(() => {
-      const handleLog = (_: any, log: string) => { ... };
-      window.ipcRenderer.on('winget:log', handleLog);       // Registra wrapper anónimo
-      return () => window.ipcRenderer.off('winget:log', handleLog);  // Intenta remover handleLog
-  }, []);
-
-  Qué pasa paso a paso:
-  1. window.ipcRenderer.on('winget:log', handleLog) se llama
-  2. Dentro del preload, se ejecuta ipcRenderer.on('winget:log', (event, ...args) => handleLog(event, ...args))
-  3. Electron registra la función anónima wrapper, NO handleLog
-  4. Cuando el componente se desmonta, se llama window.ipcRenderer.off('winget:log', handleLog)
-  5. Dentro del preload, se ejecuta ipcRenderer.off('winget:log', handleLog)
-  6. Electron busca handleLog en su lista de listeners del canal winget:log
-  7. No lo encuentra porque lo que se registró fue el wrapper anónimo
-  8. El listener permanece activo indefinidamente
-
-  Impacto:
-  Cada vez que el componente App se remonta (por ejemplo, con StrictMode en desarrollo, que monta/desmonta/remonta), se acumula un listener más. En producción con StrictMode habilitado, se duplica. Si la app tuviera navegación que
-  desmonte/remonte App, los listeners se acumularían sin límite, y cada log de winget ejecutaría N callbacks en vez de 1.
-
-  Cómo arreglarlo:
-  Guardar la referencia al wrapper en el preload:
-  on(channel: string, listener: (...args: any[]) => void) {
-      const wrapper = (_event: any, ...args: any[]) => listener(...args);
-      ipcRenderer.on(channel, wrapper);
-      return wrapper; // Devolver para poder hacer off después
-  },
-  O más sencillo, pasar el listener directamente sin wrapper.
-
-  ---
-  BUG 10 — HistoryItem no importado en renderer.d.ts
-
-  Severidad: MENOR
-  Archivo: src/renderer.d.ts:14
-  Tipo: TypeScript / Tipado
-
-  El código actual:
-  import type { AppUpdate } from './shared/types';
-
-  export interface IElectronAPI {
-      // ...
-      invoke(channel: 'history:get'): Promise<HistoryItem[]>;       // ← Usa HistoryItem
-      invoke(channel: 'history:add', entry: Omit<HistoryItem, 'date'>): Promise<void>;  // ← Usa HistoryItem
-      // ...
-  }
-
-  Qué pasa:
-  HistoryItem se usa en dos overloads de invoke pero solo se importa AppUpdate en la línea 1. HistoryItem no está importado ni declarado globalmente en este archivo.
-
-  Por qué funciona ahora:
-  TypeScript en modo no-estricto o con ciertas configuraciones de tsconfig puede resolver HistoryItem como any implícito dentro de un archivo .d.ts con declare global, o podría estar resolviéndolo desde otro archivo .d.ts del proyecto. Pero  
-  es frágil: si se habilita strict: true o se cambia la configuración de módulos, esto deja de compilar.
-
-  Cómo arreglarlo:
-  import type { AppUpdate, HistoryItem } from './shared/types';
-
-  ---
-  BUG 11 — Doble instancia de SystemService
-
-  Severidad: MENOR
-  Archivo: src/main/ipc.ts:11,16
-  Tipo: Código redundante / Arquitectura
-
-  El código actual:
-  const wingetService = new WingetService(new SystemService(), historyService);  // Instancia 1
-  const restoreService = new SystemRestoreService();
-  const settingsService = new SettingsService();
-  const logger = new LoggerService();
-  const systemService = new SystemService();  // Instancia 2 — diferente objeto
-
-  Qué pasa:
-  Se crean dos objetos separados de SystemService. La primera instancia (anónima) se pasa a WingetService. La segunda se guarda como systemService y se usa en el handler system:get-info.
-
-  Por qué importa:
-  Ahora mismo SystemService es completamente stateless (solo tiene métodos puros), así que no hay bug funcional. Pero:
-  1. Es confuso para cualquier desarrollador que lea el código — parece intencional cuando no lo es
-  2. Si se agrega estado a SystemService (cache de locale, contadores, configuración), las dos instancias divergirán y causarán bugs difíciles de rastrear
-  3. Viola el principio de single source of truth
-
-  Cómo arreglarlo:
-  const systemService = new SystemService();
-  const wingetService = new WingetService(systemService, historyService);
-
-  ---
-  BUG 12 — installAll() sin manejo de errores propagará crashes
-
-  Severidad: POTENCIAL
-  Archivo: src/main/services/winget.ts:216-228
-  Tipo: Error handling
-
-  El código actual:
-  async installAll(): Promise<void> {
-      console.log('[WingetService] Installing all updates...');
-      const arch = this.systemService.getWingetArch();
-      await execa('winget', [
-          'upgrade', '--all', '--include-unknown',
-          '--architecture', arch,
-          '--accept-source-agreements',
-          '--accept-package-agreements',
-          '--silent'
-      ]);
-  }
-
-  Qué pasa:
-  A diferencia de installUpdate(), que tiene un try/catch detallado que interpreta exit codes (3010 para reboot, -1978335227 para app in use, etc.), installAll() no tiene ningún manejo de errores. Si winget falla (exit code != 0), execa lanza
-   una excepción con reject: true (default).
-
-  El IPC handler en ipc.ts:36-39 es:
-  ipcMain.handle('winget:install-all', async () => {
-      logger.info('Installing all updates');
-      return await wingetService.installAll();
-  });
-
-  Tampoco tiene try/catch. La excepción se propaga al renderer como un IPC rejection. Si el renderer no tiene .catch(), es un unhandled promise rejection.
-
-  Impacto actual: Bajo, porque installAll no se invoca desde ningún lugar del renderer actualmente. Pero existe como handler IPC registrado, lo que significa que cualquier código futuro o cualquier extensión que lo llame heredará el problema.
-
-  Impacto futuro: Si se agrega un botón "Update All" que use este handler, cualquier fallo de una sola app romperá toda la operación sin feedback útil, sin historial, y sin diferenciar entre tipos de error.
-
-  ---
-  BUG 13 — Ruta de log hardcodeada al directorio del desarrollador
-
-  Severidad: POTENCIAL
-  Archivo: src/main/services/logger.ts:6-7
-  Tipo: Configuración / Portabilidad
-
-  El código actual:
-  const projectLogPath = path.join(
-      app.getPath('documents'),
-      'Antigravity_Projects',
-      'All_updater',
-      'app_debug.log'
-  );
-  log.transports.file.resolvePathFn = () => projectLogPath;
-
-  Qué pasa:
-  La ruta del log se construye como C:\Users\{usuario}\Documents\Antigravity_Projects\All_updater\app_debug.log. Esto funciona en tu PC porque esa carpeta existe (es tu directorio de desarrollo). Pero cuando otro usuario instala la app:      
-
-  1. app.getPath('documents') devuelve SU carpeta de Documentos (ej: C:\Users\Juan\Documents)
-  2. La ruta resultante sería C:\Users\Juan\Documents\Antigravity_Projects\All_updater\app_debug.log
-  3. La carpeta Antigravity_Projects\All_updater no existe en su PC
-  4. electron-log intentará crear el archivo y fallará silenciosamente (o creará las carpetas intermedias, lo cual es raro y confuso para el usuario)
-
-  En modo portable, el problema es peor porque se espera que todos los datos estén junto al .exe, pero el log se escribe en Documents.
-
-  Cómo arreglarlo:
-  Usar la ruta de userData (que en portable ya apunta al directorio junto al .exe):
-  const projectLogPath = path.join(app.getPath('userData'), 'app_debug.log');
+# Auditoria De Bugs - Estado Actual
+
+Fecha de actualizacion: 2026-07-05
+Version revisada: 1.0.7
+
+Este archivo reemplaza una lista historica de bugs. La lista anterior mezclaba problemas reales de versiones previas con estado ya corregido.
+
+## Verificacion Ejecutada
+
+Comando:
+
+```powershell
+npm run test:regression
+```
+
+Resultado:
+
+- ESLint: OK
+- TypeScript app: OK
+- TypeScript Electron: OK
+- Unit tests: OK
+- Integration tests: OK
+
+## Bugs Historicos Ya Corregidos
+
+Estos puntos aparecian en la lista previa, pero el codigo actual ya no coincide con esa descripcion:
+
+- IPC ya se registra dentro de `app.whenReady()` en `electron/main.ts`.
+- El cierre durante operaciones ya usa un flag `forceClose`.
+- El boton para instalar Winget ya usa `system:open-url`.
+- El preload ya conserva el wrapper de listeners para poder removerlos con `off()`.
+- `HistoryItem` ya esta importado en `src/renderer.d.ts`.
+- El logger ya escribe en `app.getPath('userData')`.
+- `SystemService` ya se instancia una sola vez y se comparte con `WingetService`.
+- La creacion de restore point usa comillas simples y escape basico para la descripcion.
+- El estado visual de Select All ya compara contra updates seleccionables, no contra todos los updates.
+- El typo principal de `scanningBody` en espanol ya esta corregido.
+- El flujo de batch limpia la marca de operacion activa en `finally`.
+
+## Correcciones Aplicadas En Esta Pasada
+
+### 1. Descarga de update de la app
+
+Estado: Corregido
+Archivos:
+
+- `src/main/services/app-update.ts`
+- `src/main/ipc.ts`
+
+Cambio:
+
+- El nombre de archivo recibido para `system:download-app-update` ahora se valida en main process.
+- Se rechazan nombres vacios, rutas, separadores, caracteres invalidos, nombres demasiado largos y extensiones fuera de `.zip`/`.exe`.
+
+### 2. Estado global de operacion activa
+
+Estado: Corregido
+Archivos:
+
+- `electron/main.ts`
+- `electron/preload.ts`
+- `src/renderer.d.ts`
+- `src/hooks/useUpdateFlow.ts`
+
+Cambio:
+
+- Se reemplazo el boolean libre `system:set-operation-active` por un flujo con token:
+  - `system:begin-operation`
+  - `system:end-operation`
+- El main process solo permite finalizar la operacion activa con el token correcto.
+
+### 3. Validacion de historial
+
+Estado: Corregido
+Archivos:
+
+- `src/main/ipc.ts`
+- `src/main/services/history.ts`
+
+Cambio:
+
+- `history:add` valida payload antes de persistir.
+- Se validan strings requeridos, strings opcionales y estados permitidos.
+- El schema de historial incluye `previousVersion`.
+
+### 4. Validacion de ignores temporales
+
+Estado: Corregido
+Archivos:
+
+- `src/main/ipc.ts`
+- `src/main/services/ignore.ts`
+
+Cambio:
+
+- `ignore:add-temporary` valida formato y longitud de package id.
+- `availableVersion` se normaliza y limita antes de persistir.
+
+### 5. Backups de settings e historial
+
+Estado: Corregido
+Archivos:
+
+- `src/main/services/settings.ts`
+- `src/main/services/history.ts`
+
+Cambio:
+
+- El archivo `.bak.json` ahora se crea antes de escribir el nuevo estado, por lo que conserva el estado anterior.
+
+### 6. Limpieza de residuos de template/debug
+
+Estado: Corregido
+Archivos:
+
+- `index.html`
+- `electron/preload.ts`
+- `src/App.css`
+
+Cambio:
+
+- El favicon apunta a `logo.png`.
+- El titulo HTML es `All Updater`.
+- Se eliminaron logs de depuracion del preload.
+- Se elimino `src/App.css`, archivo remanente no importado.
+
+## Riesgo Residual
+
+- La revision automatizada no reemplaza pruebas manuales reales en Windows con `winget`, UAC, VSS y releases firmados.
+- El flujo temporal unsigned sigue siendo una excepcion aprobada por el propietario y debe retirarse cuando vuelva la firma.

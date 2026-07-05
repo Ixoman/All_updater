@@ -60,12 +60,15 @@ export interface AppVersionCheckResult {
     success: boolean;
     offline?: boolean;
     hasUpdate: boolean;
+    canDownload?: boolean;
+    channel?: 'stable' | 'beta';
+    prerelease?: boolean;
     currentVersion: string;
     latestVersion?: string;
     releaseUrl?: string;
+    releaseNotes?: string;
     assetName?: string;
-    assetUrl?: string;
-    assetSha256?: string;
+    assetSizeBytes?: number;
     error?: string;
 }
 
@@ -83,6 +86,10 @@ export interface AppUpdateDownloadResult {
     hashVerified?: boolean;
     hashExpected?: string;
     hashActual?: string;
+    signatureVerified?: boolean;
+    signatureStatus?: 'valid' | 'unsigned' | 'invalid' | 'unknown';
+    signatureSubject?: string;
+    signatureMessage?: string;
     error?: string;
 }
 

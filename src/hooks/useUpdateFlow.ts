@@ -219,7 +219,7 @@ export function useUpdateFlow({
     setBatchResults([]);
     setRestoreVerificationSummary(null);
 
-    let operationMarked = false;
+    let operationToken: string | null = null;
     let createdRestoreMeta: { sequenceNumber: number; description: string } | null = null;
     const selectedSnapshot = pendingSelectedIdsRef.current
       ? new Set(pendingSelectedIdsRef.current)
@@ -234,8 +234,7 @@ export function useUpdateFlow({
     }
 
     try {
-      await window.ipcRenderer.invoke('system:set-operation-active', true);
-      operationMarked = true;
+      operationToken = await window.ipcRenderer.invoke('system:begin-operation');
 
       if (createRestore) {
         batchInstall.setIsCreatingRestore(true);
@@ -515,9 +514,9 @@ export function useUpdateFlow({
       setRestoreDecisionState(null);
       setPreflightResult(null);
 
-      if (operationMarked) {
+      if (operationToken) {
         try {
-          await window.ipcRenderer.invoke('system:set-operation-active', false);
+          await window.ipcRenderer.invoke('system:end-operation', operationToken);
         } catch (cleanupError) {
           console.error('[useUpdateFlow] Failed to reset operation state', cleanupError);
         }

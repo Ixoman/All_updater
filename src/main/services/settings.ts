@@ -58,7 +58,7 @@ export class SettingsService {
     }
 
     set<K extends keyof UserSettings>(key: K, value: UserSettings[K]): void {
-        this.store.set(key, value);
         this.backupStoreFile();
+        this.store.set(key, value);
     }
 }

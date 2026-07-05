@@ -92,6 +92,7 @@ export default function App() {
     runInitialAppVersionCheck,
     checkAppUpdate,
     downloadAppUpdate,
+    cancelAppUpdateDownload,
     closeDownloadGuide
   } = useAppUpdate({ addToast, t });
 
@@ -649,7 +650,7 @@ export default function App() {
                 <button
                   onClick={() => { void handleUpdateClick(); }}
                   disabled={selectedIds.size === 0 || runningPreflight}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-2.5 font-semibold text-white shadow-lg shadow-blue-500/30 transition-all hover:scale-105 hover:from-blue-500 hover:to-indigo-500 disabled:scale-100 disabled:opacity-50 disabled:grayscale sm:w-auto"
+                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 font-semibold text-white shadow-lg shadow-blue-500/20 transition-colors hover:bg-blue-700 disabled:opacity-50 disabled:grayscale sm:w-auto"
                 >
                   <ArrowDownToLine className={clsx("h-5 w-5", runningPreflight && "animate-pulse")} />
                   <span>{runningPreflight ? t('preflightRunning') : `${t('updateSelected')} (${selectedIds.size})`}</span>
@@ -669,16 +670,30 @@ export default function App() {
                   <p className="text-[11px] text-slate-800 dark:text-sky-100">
                     {t('appUpdatePrivacyNote')}
                   </p>
+                  {appUpdateInfo.releaseNotes && (
+                    <div className="mt-2 max-h-28 overflow-y-auto rounded border border-blue-200 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-800 dark:border-blue-500/15 dark:bg-black/20 dark:text-sky-100">
+                      <p className="mb-1 font-bold text-blue-900 dark:text-blue-300">{t('releaseNotes')}</p>
+                      <p className="whitespace-pre-line">{appUpdateInfo.releaseNotes}</p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={downloadAppUpdate}
-                    disabled={downloadingAppUpdate || !appUpdateInfo.assetUrl || !appUpdateInfo.assetName}
+                    disabled={downloadingAppUpdate || !appUpdateInfo.canDownload || !appUpdateInfo.assetName}
                     className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {downloadingAppUpdate ? t('appUpdateDownloading') : t('appUpdateDownload')}
                   </button>
+                  {downloadingAppUpdate && (
+                    <button
+                      onClick={() => { void cancelAppUpdateDownload(); }}
+                      className="rounded-lg border border-red-300 bg-white px-3 py-2 text-xs font-bold text-red-700 transition-colors hover:bg-red-50 dark:border-red-900/40 dark:bg-white/5 dark:text-red-300 dark:hover:bg-red-900/20"
+                    >
+                      {t('appUpdateCancelDownload')}
+                    </button>
+                  )}
                   {appUpdateInfo.releaseUrl && (
                     <button
                       onClick={() => window.ipcRenderer.invoke('system:open-url', appUpdateInfo.releaseUrl!)}
@@ -736,43 +751,53 @@ export default function App() {
           )}
 
           {wingetHealth && (
-            <div className="rounded-xl border border-slate-300 bg-white p-4 dark:border-white/10 dark:bg-black/20">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthTitle')}</p>
-                <span className={clsx(
-                  "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider",
-                  wingetHealth.installed && wingetHealth.sourcesHealthy
-                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                    : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
-                )}>
-                  {wingetHealth.installed && wingetHealth.sourcesHealthy ? t('wingetHealthOk') : t('wingetHealthNeedsAttention')}
-                </span>
-              </div>
-              <div className="mt-2 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
-                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthInstalled')}</p>
-                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.installed ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
-                </div>
-                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
-                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthVersion')}</p>
-                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.version || t('unknown')}</p>
-                </div>
-                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
-                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthSources')}</p>
-                  <p className="text-slate-800 dark:text-sky-200">{wingetHealth.sourcesHealthy ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
-                </div>
-                <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
-                  <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthNetwork')}</p>
-                  <p className="text-slate-800 dark:text-sky-200">{isOnline ? t('networkOnline') : t('networkOffline')}</p>
+            <div className="rounded-lg border border-slate-300 bg-white px-4 py-3 dark:border-white/10 dark:bg-black/20">
+              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthTitle')}</p>
+                    <span className={clsx(
+                      "rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+                      wingetHealth.installed && wingetHealth.sourcesHealthy && isOnline
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                        : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                    )}>
+                      {wingetHealth.installed && wingetHealth.sourcesHealthy && isOnline ? t('wingetHealthOk') : t('wingetHealthNeedsAttention')}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs font-medium text-slate-700 dark:text-sky-200">
+                    Winget {wingetHealth.version || t('unknown')} · {wingetHealth.sourcesHealthy ? t('wingetHealthSources') : t('wingetSourceIssue')} · {isOnline ? t('networkOnline') : t('networkOffline')}
+                  </p>
                 </div>
               </div>
+
+              {(!wingetHealth.installed || !wingetHealth.sourcesHealthy || !isOnline || wingetHealth.error) && (
+                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                    <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthInstalled')}</p>
+                    <p className="text-slate-800 dark:text-sky-200">{wingetHealth.installed ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                    <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthVersion')}</p>
+                    <p className="text-slate-800 dark:text-sky-200">{wingetHealth.version || t('unknown')}</p>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                    <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthSources')}</p>
+                    <p className="text-slate-800 dark:text-sky-200">{wingetHealth.sourcesHealthy ? t('wingetHealthYes') : t('wingetHealthNo')}</p>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-slate-100 px-2 py-1 dark:border-white/10 dark:bg-white/5">
+                    <p className="font-bold text-slate-900 dark:text-sky-100">{t('wingetHealthNetwork')}</p>
+                    <p className="text-slate-800 dark:text-sky-200">{isOnline ? t('networkOnline') : t('networkOffline')}</p>
+                  </div>
+                </div>
+              )}
               {wingetHealth.sourceSummary && (
-                <p className="mt-2 text-[11px] font-medium text-slate-800 dark:text-sky-200 break-words">
+                <p className="mt-2 break-words text-[11px] font-medium text-slate-700 dark:text-sky-200">
                   {t('wingetHealthSourcesDetected').replace('{sources}', wingetHealth.sourceSummary)}
                 </p>
               )}
               {wingetHealth.error && (
-                <p className="mt-1 text-[11px] font-medium text-amber-800 dark:text-amber-300 break-words">
+                <p className="mt-1 break-words text-[11px] font-medium text-amber-800 dark:text-amber-300">
                   {formatCompactText(wingetHealth.error)}
                 </p>
               )}
@@ -788,10 +813,7 @@ export default function App() {
 
           {isWingetMissing ? (
             <div className="flex flex-1 flex-col items-center justify-center space-y-6 py-20 text-center">
-              <div className="relative">
-                <div className="absolute -inset-4 rounded-full bg-red-500/20 blur-xl dark:bg-red-400/10" />
-                <XCircle className="relative h-24 w-24 text-red-500" strokeWidth={1} />
-              </div>
+              <XCircle className="h-20 w-20 text-red-500" strokeWidth={1} />
               <div className="max-w-md space-y-2">
                 <h3 className="text-2xl font-bold text-black dark:text-white">{t('wingetMissing')}</h3>
                 <p className="text-slate-900 dark:text-sky-100">
@@ -807,17 +829,11 @@ export default function App() {
             </div>
           ) : loading ? (
             <div className="flex flex-1 flex-col items-center justify-center space-y-8 py-20 text-center animate-in fade-in zoom-in duration-500">
-              <div className="relative">
-                <div className="absolute -inset-8 rounded-full bg-blue-500/10 blur-2xl animate-pulse dark:bg-blue-400/5" />
-                <div className="relative flex items-center justify-center">
-                  <div className="h-24 w-24 rounded-full border-4 border-slate-100 border-t-blue-600 animate-spin dark:border-slate-800 dark:border-t-blue-500" />
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="h-16 w-16 rounded-full bg-slate-50 dark:bg-slate-900 shadow-inner" />
-                  </div>
-                </div>
+              <div className="flex items-center justify-center">
+                <div className="h-20 w-20 rounded-full border-4 border-slate-100 border-t-blue-600 animate-spin dark:border-slate-800 dark:border-t-blue-500" />
               </div>
               <div className="space-y-4">
-                <h3 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-700 to-indigo-700 dark:from-blue-400 dark:to-indigo-400 animate-pulse transition-all">
+                <h3 className="text-3xl font-bold text-slate-950 dark:text-sky-100">
                   {t('checking')}...
                 </h3>
                 <p className="text-black dark:text-sky-200 font-bold max-w-xs mx-auto leading-relaxed text-lg">
@@ -827,38 +843,22 @@ export default function App() {
             </div>
           ) : !hasChecked ? (
             <div className="flex flex-1 flex-col items-center justify-center space-y-6 py-20 text-center">
-              <div className="relative">
-                <div className="absolute -inset-4 rounded-full bg-blue-500/20 blur-xl dark:bg-blue-400/10" />
-                <Coffee className="relative h-24 w-24 text-slate-900/40 dark:text-slate-600" strokeWidth={1} />
-              </div>
+              <Coffee className="h-20 w-20 text-slate-900/40 dark:text-slate-600" strokeWidth={1} />
               <div className="max-w-md space-y-2">
                 <h3 className="text-2xl font-bold text-black dark:text-white">{t('readyTitle')}</h3>
-              <p className="font-medium text-slate-900 dark:text-sky-100">{t('readyDesc')}</p>
+                <p className="font-medium text-slate-900 dark:text-sky-100">{t('readyDesc')}</p>
               </div>
               <button
                 onClick={checkUpdates}
-                className="group relative flex items-center gap-3 overflow-hidden rounded-2xl bg-slate-900 px-8 py-4 text-lg font-bold text-white shadow-xl transition-all hover:scale-105 hover:bg-slate-800 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+                className="group relative flex items-center gap-3 overflow-hidden rounded-lg bg-slate-900 px-8 py-4 text-lg font-bold text-white shadow-lg transition-colors hover:bg-slate-800 dark:bg-white dark:text-black dark:hover:bg-gray-100"
               >
                 <RefreshCw className="h-6 w-6 transition-transform group-hover:rotate-180" />
                 {t('checkUpdates')}
               </button>
-              <p className="text-xl sm:text-2xl mt-8 font-bold text-slate-900 dark:text-sky-100 animate-in fade-in slide-in-from-top-2 duration-700 delay-300 max-w-2xl px-4 leading-relaxed">
-                {t('footerLove')} <span className="text-blue-600 dark:text-blue-400">Samuel</span>.
-                <br />
-                {t('footerAI')}
-                <span className="inline-block align-middle ml-2 animate-pulse">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className="text-red-500" style={{ shapeRendering: 'crispEdges' }}>
-                    <path d="M4 4h4v4H4zM16 4h4v4h-4zM2 8h4v4H2zM8 8h8v4H8zM18 8h4v4h-4zM2 12h4v4H2zM6 16h4v4H6zM10 20h4v4h-4zM14 16h4v4h-4zM18 12h4v4h-4z" fill="currentColor" />
-                  </svg>
-                </span>
-              </p>
             </div>
           ) : updates.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center space-y-6 py-20 text-center">
-              <div className="relative">
-                <div className="absolute -inset-4 rounded-full bg-emerald-500/20 blur-xl dark:bg-emerald-400/10" />
-                <CheckCircle className="relative h-24 w-24 text-emerald-600 dark:text-emerald-500" strokeWidth={1} />
-              </div>
+              <CheckCircle className="h-20 w-20 text-emerald-600 dark:text-emerald-500" strokeWidth={1} />
               <h3 className="text-2xl font-bold text-black dark:text-white">{t('allClean')}</h3>
               <p className="font-medium text-slate-900 dark:text-sky-100 text-lg">{t('allCleanDesc')}</p>
               <button
@@ -887,7 +887,7 @@ export default function App() {
                 </span>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-1 xl:grid-cols-2">
                 {updates.map(update => (
                   <UpdateCard
                     key={update.id}

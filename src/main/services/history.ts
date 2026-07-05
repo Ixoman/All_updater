@@ -16,6 +16,7 @@ const schema = {
                 id: { type: 'string' },
                 appName: { type: 'string' },
                 version: { type: 'string' },
+                previousVersion: { type: 'string' },
                 status: { type: 'string' },
                 date: { type: 'string' },
                 details: { type: 'string' }
@@ -59,8 +60,8 @@ export class HistoryService {
         };
         items.unshift(newEntry); // Newest first
         // Limit history to last 200 items to avoid bloat
-        this.store.set('items', items.slice(0, 200));
         this.backupStoreFile();
+        this.store.set('items', items.slice(0, 200));
     }
 
     isVersionSkipped(id: string, version: string): boolean {
@@ -75,7 +76,7 @@ export class HistoryService {
     }
 
     clearHistory(): void {
-        this.store.set('items', []);
         this.backupStoreFile();
+        this.store.set('items', []);
     }
 }

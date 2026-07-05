@@ -1,6 +1,6 @@
 import React from 'react';
 import { clsx } from 'clsx';
-import { LayoutDashboard, History, Moon, Sun, Languages } from 'lucide-react';
+import { CircleHelp, LayoutDashboard, History, Moon, Sun, Languages } from 'lucide-react';
 import { useLanguage } from '../context/LanguageContext';
 import logo from '../assets/logo.png';
 import { TroubleshootingModal } from './TroubleshootingModal';
@@ -18,6 +18,12 @@ export const Layout: React.FC<LayoutProps> = ({ children, darkMode, toggleDarkMo
     const [userDataPath, setUserDataPath] = React.useState<string | null>(null);
     const [showTroubleshooting, setShowTroubleshooting] = React.useState(false);
 
+    const openLogs = React.useCallback(() => {
+        void window.ipcRenderer.invoke('system:open-logs').catch((error) => {
+            console.error('Failed to open logs:', error);
+        });
+    }, []);
+
     React.useEffect(() => {
         const fetchPath = async () => {
             try {
@@ -32,12 +38,6 @@ export const Layout: React.FC<LayoutProps> = ({ children, darkMode, toggleDarkMo
 
     return (
         <div className={clsx("flex h-screen w-full flex-col overflow-hidden transition-colors duration-300 font-sans selection:bg-blue-500/30 md:flex-row", darkMode ? "dark theme-dark bg-[#070b14] text-sky-100" : "theme-light bg-[#f4f7ff] text-slate-950")}>
-
-            {/* Ambient Background */}
-            <div className="fixed inset-0 z-0 pointer-events-none">
-                <div className="absolute top-[-20%] left-[-10%] h-[600px] w-[600px] rounded-full bg-amber-300/20 blur-[120px] dark:bg-cyan-900/30" />
-                <div className="absolute bottom-[-20%] right-[-10%] h-[600px] w-[600px] rounded-full bg-sky-400/20 blur-[120px] dark:bg-blue-900/30" />
-            </div>
 
             {/* Sidebar */}
             <aside className="relative z-20 flex w-full flex-col overflow-y-auto border-b border-slate-300 bg-white/90 backdrop-blur-xl md:w-64 md:min-w-[16rem] md:border-b-0 md:border-r dark:border-white/5 dark:bg-black/20">
@@ -80,39 +80,17 @@ export const Layout: React.FC<LayoutProps> = ({ children, darkMode, toggleDarkMo
                     </div>
 
                 </nav>
-
-                {/* Data Transparency Message */}
-                <div className="px-4 pb-4">
-                    <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs shadow-sm dark:border-blue-500/10 dark:bg-blue-900/10">
-                        <p className="font-bold text-blue-900 dark:text-blue-300 mb-1">
-                            {t('dataTransparencyTitle')}
-                        </p>
-                        <p className="mb-2 font-medium leading-relaxed text-slate-800 dark:text-sky-100">
-                            {t('dataTransparency')}
-                        </p>
-                        <code className="block w-full break-all rounded border border-blue-200 bg-white px-2 py-1.5 font-mono text-[10px] text-slate-800 transition-colors dark:border-transparent dark:bg-black/20 dark:text-sky-100">
-                            {userDataPath || '...'}
-                        </code>
-                        <button
-                            onClick={() => {
-                                void window.ipcRenderer.invoke('system:open-logs').catch((error) => {
-                                    console.error('Failed to open logs:', error);
-                                });
-                            }}
-                            className="mt-2 w-full rounded border border-blue-200 bg-white px-2 py-1.5 text-[11px] font-bold text-blue-700 transition-colors hover:bg-blue-100 dark:border-white/10 dark:bg-white/5 dark:text-blue-300 dark:hover:bg-white/10"
-                        >
-                            {t('openLogs')}
-                        </button>
-                        <button
-                            onClick={() => setShowTroubleshooting(true)}
-                            className="mt-2 w-full rounded border border-slate-300 bg-slate-100 px-2 py-1.5 text-[11px] font-bold text-slate-900 transition-colors hover:bg-slate-200 dark:border-white/10 dark:bg-white/5 dark:text-sky-100 dark:hover:bg-white/10"
-                        >
-                            {t('troubleshooting')}
-                        </button>
-                    </div>
-                </div>
-
                 <div className="space-y-2 border-t border-slate-200 p-4 dark:border-white/5">
+                    <button
+                        onClick={() => setShowTroubleshooting(true)}
+                        className="flex w-full items-center justify-between rounded-lg p-2 text-sm font-bold text-black transition-colors hover:bg-gray-100 dark:text-sky-100 dark:hover:bg-white/5"
+                    >
+                        <span className="flex items-center gap-2">
+                            <CircleHelp className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                            {t('troubleshooting')}
+                        </span>
+                    </button>
+
                     {/* Idioma Selector */}
                     <div className="flex items-center justify-between rounded-lg p-2 text-sm font-bold text-black dark:text-sky-100">
                         <span className="flex items-center gap-2">
@@ -166,6 +144,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, darkMode, toggleDarkMo
             <TroubleshootingModal
                 isOpen={showTroubleshooting}
                 onClose={() => setShowTroubleshooting(false)}
+                userDataPath={userDataPath}
+                onOpenLogs={openLogs}
             />
         </div>
     );

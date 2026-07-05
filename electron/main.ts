@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import path from 'path'
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'url'
 
 // Necessary for ESM in Electron
@@ -67,8 +68,10 @@ async function ensureElevated() {
 
 let win: BrowserWindow | null
 let isOperationActive = false;
+let activeOperationToken: string | null = null;
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
+const skipElevationCheckInDev = !app.isPackaged && process.env.ALL_UPDATER_SKIP_ELEVATION === '1'
 
 function createWindow() {
     let forceClose = false;
@@ -105,6 +108,7 @@ function createWindow() {
             if (choice === 1) {
                 forceClose = true;
                 isOperationActive = false; // Allow closing next time
+                activeOperationToken = null;
                 win?.close();
             }
         }
@@ -124,8 +128,28 @@ function createWindow() {
 }
 
 // IPC to manage operation state
-ipcMain.handle('system:set-operation-active', (_, active: boolean) => {
-    isOperationActive = active;
+ipcMain.handle('system:begin-operation', () => {
+    if (isOperationActive) {
+        throw new Error('An operation is already active.');
+    }
+
+    activeOperationToken = randomUUID();
+    isOperationActive = true;
+    return activeOperationToken;
+});
+
+ipcMain.handle('system:end-operation', (_, token: string) => {
+    if (!isOperationActive) {
+        activeOperationToken = null;
+        return;
+    }
+
+    if (!token || token !== activeOperationToken) {
+        throw new Error('Invalid operation token.');
+    }
+
+    activeOperationToken = null;
+    isOperationActive = false;
 });
 
 app.on('window-all-closed', () => {
@@ -141,15 +165,19 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(async () => {
-    const isElevated = await ensureElevated();
+    if (!skipElevationCheckInDev) {
+        const isElevated = await ensureElevated();
 
-    if (!isElevated) {
-        dialog.showErrorBox(
-            'Insufficient privileges / Privilegios insuficientes',
-            'All Updater requires Administrator permissions to manage Winget and create restore points.\n\nAll Updater requiere permisos de Administrador para gestionar Winget y crear puntos de restauracion.'
-        );
-        app.quit();
-        return;
+        if (!isElevated) {
+            dialog.showErrorBox(
+                'Insufficient privileges / Privilegios insuficientes',
+                'All Updater requires Administrator permissions to manage Winget and create restore points.\n\nAll Updater requiere permisos de Administrador para gestionar Winget y crear puntos de restauracion.'
+            );
+            app.quit();
+            return;
+        }
+    } else {
+        console.warn('[Main] Skipping Administrator check for local UI development.');
     }
 
     const { setupIPC } = await import('../src/main/ipc.js');

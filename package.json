@@ -1,11 +1,12 @@
 {
   "name": "all-updater",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:ui": "cross-env ALL_UPDATER_SKIP_ELEVATION=1 vite",
     "build": "npm run build:portable:signed",
     "build:unsigned": "tsc -b && vite build && electron-builder",
     "build:local": "npm run build:portable:unsigned",

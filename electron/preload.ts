@@ -1,7 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-console.log('[Preload] Script loaded');
-
 type RendererListener = Parameters<typeof ipcRenderer.on>[1];
 const listenerMap = new Map<string, Map<RendererListener, RendererListener>>();
 const allowedInvokeChannels = new Set([
@@ -17,7 +15,8 @@ const allowedInvokeChannels = new Set([
     'system:set-online-state',
     'settings:get',
     'settings:set',
-    'system:set-operation-active',
+    'system:begin-operation',
+    'system:end-operation',
     'system:open-url',
     'system:show-item-in-folder',
     'system:open-path',
@@ -25,6 +24,7 @@ const allowedInvokeChannels = new Set([
     'system:open-services-console',
     'system:check-app-update',
     'system:download-app-update',
+    'system:cancel-app-update-download',
     'system:run-preflight',
     'system:export-diagnostics',
     'system:check-data-folder',
@@ -96,9 +96,6 @@ contextBridge.exposeInMainWorld('ipcRenderer', {
         if (!allowedInvokeChannels.has(channel)) {
             throw new Error(`IPC channel not allowed for invoke(): ${channel}`);
         }
-        console.log('[Preload] IPC invoke called:', channel);
         return ipcRenderer.invoke(channel, ...omit)
     },
 })
-
-console.log('[Preload] contextBridge.exposeInMainWorld completed');

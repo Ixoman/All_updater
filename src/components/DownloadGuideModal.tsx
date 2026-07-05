@@ -40,6 +40,13 @@ export const DownloadGuideModal: React.FC<DownloadGuideModalProps> = ({ guide, o
           {guide.filePath}
         </p>
 
+        <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200">
+          <p className="font-bold">{t('downloadGuideRollbackTitle')}</p>
+          <p className="mt-1 leading-relaxed">
+            {guide.isZip ? t('downloadGuideRollbackZip') : t('downloadGuideRollbackExe')}
+          </p>
+        </div>
+
         <div className="mt-4 grid gap-2 sm:grid-cols-2">
           <button
             onClick={() => { void window.ipcRenderer.invoke('system:show-item-in-folder', guide.filePath); }}

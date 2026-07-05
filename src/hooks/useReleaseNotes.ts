@@ -21,9 +21,15 @@ export function useReleaseNotes({ addToast, t }: UseReleaseNotesParams) {
 
   const prefetchReleaseNotesForUpdates = useCallback(async (items: AppUpdate[]) => {
     const runId = ++releaseNotesPrefetchRunRef.current;
+    const maxConcurrentRequests = 4;
+    let nextIndex = 0;
 
-    for (const update of items) {
+    const fetchNext = async (): Promise<void> => {
       if (releaseNotesPrefetchRunRef.current !== runId) return;
+
+      const update = items[nextIndex];
+      nextIndex += 1;
+      if (!update) return;
 
       const { id } = update;
       setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: true }));
@@ -43,7 +49,16 @@ export function useReleaseNotes({ addToast, t }: UseReleaseNotesParams) {
           setReleaseNotesLoadingById((prev) => ({ ...prev, [id]: false }));
         }
       }
-    }
+
+      await fetchNext();
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(maxConcurrentRequests, items.length) },
+        () => fetchNext()
+      )
+    );
   }, []);
 
   const openReleaseNotesForUpdate = useCallback(async (update: AppUpdate) => {

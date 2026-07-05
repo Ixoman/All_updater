@@ -81,6 +81,108 @@ function setSettingSafely(key: keyof UserSettings, value: unknown): void {
     throw new Error(`Invalid value for setting ${key}`);
 }
 
+const historyStatuses = new Set<HistoryItem['status']>([
+    'success',
+    'failed',
+    'skipped',
+    'inapplicable',
+    'reboot',
+    'in-use',
+    'security-error'
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readRequiredString(record: Record<string, unknown>, key: string, maxLength: number): string {
+    const value = record[key];
+    if (typeof value !== 'string') {
+        throw new Error(`Invalid ${key}`);
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > maxLength) {
+        throw new Error(`Invalid ${key}`);
+    }
+
+    return trimmed;
+}
+
+function readOptionalString(record: Record<string, unknown>, key: string, maxLength: number): string | undefined {
+    const value = record[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== 'string') {
+        throw new Error(`Invalid ${key}`);
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.length > maxLength) {
+        throw new Error(`Invalid ${key}`);
+    }
+
+    return trimmed;
+}
+
+function validateHistoryEntryPayload(entry: unknown): Omit<HistoryItem, 'date'> {
+    if (!isRecord(entry)) {
+        throw new Error('Invalid history entry');
+    }
+
+    const status = entry.status;
+    if (typeof status !== 'string' || !historyStatuses.has(status as HistoryItem['status'])) {
+        throw new Error('Invalid history status');
+    }
+
+    const validated: Omit<HistoryItem, 'date'> = {
+        id: readRequiredString(entry, 'id', 256),
+        appName: readRequiredString(entry, 'appName', 200),
+        version: readRequiredString(entry, 'version', 128),
+        status: status as HistoryItem['status']
+    };
+
+    const previousVersion = readOptionalString(entry, 'previousVersion', 128);
+    if (previousVersion) {
+        validated.previousVersion = previousVersion;
+    }
+
+    const details = readOptionalString(entry, 'details', 2000);
+    if (details) {
+        validated.details = details;
+    }
+
+    return validated;
+}
+
+function validatePackageIdInput(id: unknown): string {
+    if (typeof id !== 'string') {
+        throw new Error('Invalid package id');
+    }
+
+    const trimmed = id.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{1,255}$/.test(trimmed)) {
+        throw new Error('Invalid package id');
+    }
+
+    return trimmed;
+}
+
+function validateOptionalVersionInput(version: unknown): string | undefined {
+    if (version === undefined || version === null) return undefined;
+    if (typeof version !== 'string') {
+        throw new Error('Invalid package version');
+    }
+
+    const trimmed = version.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.length > 128 || Array.from(trimmed).some((char) => char.charCodeAt(0) < 32)) {
+        throw new Error('Invalid package version');
+    }
+
+    return trimmed;
+}
+
 function normalizePathForPolicy(targetPath: string): string {
     const resolved = path.resolve(targetPath);
     try {
@@ -300,13 +402,18 @@ export function setupIPC() {
         return await appUpdateService.checkLatestVersion();
     });
 
-    ipcMain.handle('system:download-app-update', async (event, assetUrl: string, fileName: string, expectedSha256?: string) => {
-        logger.info(`Downloading app update asset: ${fileName}`);
-        const result = await appUpdateService.downloadUpdateAsset(event.sender, assetUrl, fileName, expectedSha256);
+    ipcMain.handle('system:download-app-update', async (event) => {
+        logger.info('Downloading approved app update asset');
+        const result = await appUpdateService.downloadUpdateAsset(event.sender);
         if (result.filePath) {
             registerApprovedRendererPath(result.filePath);
         }
         return result;
+    });
+
+    ipcMain.handle('system:cancel-app-update-download', async () => {
+        logger.info('Canceling active app update download');
+        return appUpdateService.cancelActiveDownload();
     });
 
     ipcMain.handle('system:run-preflight', async (event) => {
@@ -327,7 +434,9 @@ export function setupIPC() {
 
     // History
     ipcMain.handle('history:get', async () => historyService.getHistory());
-    ipcMain.handle('history:add', async (_, entry: Omit<HistoryItem, 'date'>) => historyService.addEntry(entry));
+    ipcMain.handle('history:add', async (_, entry: unknown) => {
+        historyService.addEntry(validateHistoryEntryPayload(entry));
+    });
     ipcMain.handle('history:clear', async () => {
         historyService.clearHistory();
     });
@@ -342,11 +451,12 @@ export function setupIPC() {
     ipcMain.handle('ignore:get-active', async () => {
         return ignoreService.getActiveRules();
     });
-    ipcMain.handle('ignore:add-temporary', async (_, id: string, availableVersion: string | undefined, days: number) => {
-        if (!id || typeof id !== 'string') {
-            throw new Error('Invalid package id');
-        }
-        return ignoreService.addTemporaryIgnore(id, availableVersion, days);
+    ipcMain.handle('ignore:add-temporary', async (_, id: unknown, availableVersion: unknown, days: number) => {
+        return ignoreService.addTemporaryIgnore(
+            validatePackageIdInput(id),
+            validateOptionalVersionInput(availableVersion),
+            days
+        );
     });
 
     // Logger Pass-through
