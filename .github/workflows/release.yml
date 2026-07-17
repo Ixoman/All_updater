@@ -1,0 +1,68 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish unsigned portable
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run regression suite
+        run: npm run test:regression
+
+      - name: Build unsigned portable release
+        run: npm run release
+
+      - name: Validate release inputs
+        shell: pwsh
+        run: |
+          $notesPath = "RELEASE_NOTES_$env:GITHUB_REF_NAME.md"
+          $assetPath = "release/All-Updater-$env:GITHUB_REF_NAME-portable.zip"
+
+          if (-not (Test-Path -LiteralPath $notesPath)) {
+            throw "Release notes not found: $notesPath"
+          }
+
+          if (-not (Test-Path -LiteralPath $assetPath)) {
+            throw "Release asset not found: $assetPath"
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath "release/All Updater-$($env:GITHUB_REF_NAME.TrimStart('v')).exe"
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Expected the default release artifact to be unsigned, got: $($signature.Status)"
+          }
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notesPath = "RELEASE_NOTES_$env:GITHUB_REF_NAME.md"
+          $assetPath = "release/All-Updater-$env:GITHUB_REF_NAME-portable.zip"
+
+          gh release create $env:GITHUB_REF_NAME $assetPath `
+            --repo $env:GITHUB_REPOSITORY `
+            --verify-tag `
+            --title $env:GITHUB_REF_NAME `
+            --notes-file $notesPath `
+            --latest
