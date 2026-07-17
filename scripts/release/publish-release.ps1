@@ -15,7 +15,7 @@ if (-not (Test-Path $packageJsonPath)) {
 
 $ghCommand = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $ghCommand) {
-  throw "GitHub CLI (gh) is required for unsigned GitHub publishing."
+  throw "GitHub CLI (gh) is required for GitHub publishing."
 }
 
 $packageJson = Get-Content $packageJsonPath -Raw | ConvertFrom-Json
@@ -31,7 +31,7 @@ $zipPath = Join-Path $releaseDir "All-Updater-v$version-portable.zip"
 $notesPath = Join-Path $workspaceRoot "RELEASE_NOTES_v$version.md"
 
 if (-not (Test-Path $zipPath)) {
-  throw "Expected ZIP artifact not found: $zipPath. Run 'npm run release:portable:unsigned' first."
+  throw "Expected ZIP artifact not found: $zipPath. Run 'npm run release' first."
 }
 
 if (-not (Test-Path $notesPath)) {
@@ -48,7 +48,7 @@ if ($LASTEXITCODE -eq 0) {
 if ($releaseExists) {
   & gh release upload $tag $zipPath --clobber --repo $Repo
   if ($LASTEXITCODE -ne 0) {
-    throw "Failed to upload unsigned ZIP to existing release $tag"
+    throw "Failed to upload ZIP to existing release $tag"
   }
   Write-Host "Updated existing GitHub release $tag with $zipPath"
   exit 0

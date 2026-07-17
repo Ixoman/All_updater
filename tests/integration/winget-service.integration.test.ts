@@ -14,7 +14,7 @@ interface IntegrationUpdate {
 interface WingetServiceIntegrationHarness {
   getAvailableUpdates: () => Promise<IntegrationUpdate[]>;
   tryGetUpdatesFromJson: () => Promise<IntegrationUpdate[] | null>;
-  runWingetCommandWithFallback?: () => Promise<{ stdout: string; stderr: string; all: string }>;
+  runWingetCommandWithFallback?: () => Promise<{ stdout: string; stderr: string; all: string; exitCode: number | null }>;
 }
 
 export async function run() {
@@ -50,7 +50,6 @@ export async function run() {
   ];
 
   const service = new WingetService(
-    {} as never,
     { getHistory: () => history } as never
   ) as unknown as WingetServiceIntegrationHarness;
 
@@ -94,7 +93,7 @@ export async function run() {
   assert.equal(filteredUpdates[0].previousStatus, 'inapplicable');
   assert.equal(filteredUpdates[0].previousDetails, 'Manual uninstall required');
 
-  const textFallbackService = new WingetService({} as never) as unknown as WingetServiceIntegrationHarness;
+  const textFallbackService = new WingetService() as unknown as WingetServiceIntegrationHarness;
   textFallbackService.tryGetUpdatesFromJson = async () => null;
   textFallbackService.runWingetCommandWithFallback = async () => ({
     stdout: '',
@@ -103,7 +102,8 @@ export async function run() {
       'Name                     Id                      Version    Available  Source',
       '--------------------------------------------------------------------------',
       'OBS Studio               OBSProject.OBSStudio    31.0.0     31.0.1     winget'
-    ].join('\n')
+    ].join('\n'),
+    exitCode: 0
   });
 
   const textParsedUpdates = await textFallbackService.getAvailableUpdates();
@@ -111,4 +111,18 @@ export async function run() {
   assert.equal(textParsedUpdates.length, 1);
   assert.equal(textParsedUpdates[0].id, 'OBSProject.OBSStudio');
   assert.equal(textParsedUpdates[0].available, '31.0.1');
+
+  const deniedService = new WingetService() as unknown as WingetServiceIntegrationHarness;
+  deniedService.tryGetUpdatesFromJson = async () => null;
+  deniedService.runWingetCommandWithFallback = async () => ({
+    stdout: '',
+    stderr: 'Access is denied.',
+    all: 'Access is denied.',
+    exitCode: 5
+  });
+
+  await assert.rejects(
+    () => deniedService.getAvailableUpdates(),
+    /WingetAccessDenied/
+  );
 }

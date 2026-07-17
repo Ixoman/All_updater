@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
 import type { RestoreFailureReason, RestorePointResult, RestorePointVerificationResult } from '../../shared/types';
+import { isValidRestoreSequence, parseRestoreSequence } from '../restore-validation.js';
 
 export class SystemRestoreService {
     private getRestoreLogPath(): string {
@@ -40,9 +41,7 @@ export class SystemRestoreService {
     private async getLatestRestoreSequence(): Promise<number | null> {
         const script = "$ErrorActionPreference='SilentlyContinue'; $rp = Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending | Select-Object -First 1 SequenceNumber; if ($null -eq $rp) { '' } else { $rp.SequenceNumber }";
         const result = await this.runPowerShellScript(script);
-        const raw = result.stdout.trim();
-        const parsed = Number(raw);
-        return Number.isFinite(parsed) ? parsed : null;
+        return parseRestoreSequence(result.stdout);
     }
 
     private async findRestoreSequenceByDescription(description: string): Promise<number | null> {
@@ -54,12 +53,12 @@ export class SystemRestoreService {
             "if ($null -eq $rp) { '' } else { $rp.SequenceNumber }";
 
         const result = await this.runPowerShellScript(script);
-        const raw = result.stdout.trim();
-        const parsed = Number(raw);
-        return Number.isFinite(parsed) ? parsed : null;
+        return parseRestoreSequence(result.stdout);
     }
 
     private async getRestorePointBySequence(sequenceNumber: number): Promise<{ sequenceNumber: number; description: string } | null> {
+        if (!isValidRestoreSequence(sequenceNumber)) return null;
+
         const script =
             "$ErrorActionPreference='SilentlyContinue'; " +
             `$target = ${sequenceNumber}; ` +
@@ -73,7 +72,7 @@ export class SystemRestoreService {
         try {
             const parsed = JSON.parse(raw) as { SequenceNumber?: unknown; Description?: unknown };
             const sequence = Number(parsed.SequenceNumber);
-            if (!Number.isFinite(sequence)) return null;
+            if (!isValidRestoreSequence(sequence)) return null;
             return {
                 sequenceNumber: sequence,
                 description: typeof parsed.Description === 'string' ? parsed.Description : ''

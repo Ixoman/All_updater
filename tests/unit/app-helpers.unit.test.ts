@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   buildIgnoreRuleKey,
   isUpdateIgnoredByRule,
+  isUpdateSelectable,
   parseEstimatedPercentFromWingetLog,
   parseInstallerFailurePayload,
   parsePercentFromWingetLog
@@ -27,6 +28,8 @@ export async function run() {
 
   assert.equal(buildIgnoreRuleKey(update.id, update.available), 'Sample.App@@2.0.0');
   assert.equal(buildIgnoreRuleKey(update.id), 'Sample.App@@*');
+  assert.equal(isUpdateSelectable({ ...update, previousStatus: 'inapplicable' }), true);
+  assert.equal(isUpdateSelectable({ ...update, previousStatus: 'skipped' }), false);
 
   assert.equal(
     isUpdateIgnoredByRule(update, {

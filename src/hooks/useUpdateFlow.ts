@@ -312,7 +312,7 @@ export function useUpdateFlow({
           while (retry) {
             try {
               retry = false;
-              await window.ipcRenderer.invoke('winget:install-update', id);
+              await window.ipcRenderer.invoke('winget:install-update', id, update?.source);
             } catch (error: unknown) {
               const errorMessage = getErrorMessage(error);
 

@@ -7,7 +7,7 @@ type WingetParserHarness = {
 };
 
 export async function run() {
-  const service = new WingetService({} as never) as unknown as WingetParserHarness;
+  const service = new WingetService() as unknown as WingetParserHarness;
 
   const textOutput = [
     'Name                     Id                      Version    Available  Source',
@@ -48,8 +48,12 @@ export async function run() {
     []
   );
 
-  assert.deepEqual(
-    service.parseWingetOutput('Git.Git 2.45.1 2.46.0 invalid-line-without-name-column'),
-    []
+  assert.throws(
+    () => service.parseWingetOutput('Git.Git 2.45.1 2.46.0 invalid-line-without-name-column'),
+    /WingetOutputParseError/
+  );
+  assert.throws(
+    () => service.parseWingetOutput('Access is denied.'),
+    /WingetOutputParseError/
   );
 }

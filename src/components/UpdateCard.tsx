@@ -4,6 +4,7 @@ import { clsx } from 'clsx';
 import { AlertCircle, ArrowRight, Check } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useLanguage } from '../context/LanguageContext';
+import { isUpdateSelectable } from '../utils/app-helpers';
 
 interface UpdateCardProps {
     update: AppUpdate;
@@ -33,6 +34,7 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
         normalizedInstalledVersion === '<desconocida>' ||
         normalizedInstalledVersion === '-';
     const isInapplicable = update.previousStatus === 'inapplicable';
+    const isSelectable = isUpdateSelectable(update);
     const isManualUninstall = update.previousDetails?.includes('Manual uninstall') || update.previousDetails?.includes('diferente');
     const hasReleaseNotesUrl = typeof releaseNotesUrl === 'string' && releaseNotesUrl.length > 0;
 
@@ -40,13 +42,13 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
         <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            onClick={isInapplicable ? undefined : onToggle}
+            onClick={isSelectable ? onToggle : undefined}
             className={clsx(
                 "group relative overflow-hidden rounded-lg border p-3 shadow-sm transition-colors hover:shadow-md",
-                isInapplicable
-                    ? "cursor-default border-amber-300 bg-amber-50/50 dark:border-amber-500/30 dark:bg-amber-900/10"
-                    : isSelected
+                isSelected
                         ? "cursor-pointer border-blue-500 bg-blue-50/50 dark:border-blue-500/50 dark:bg-blue-900/10"
+                    : isInapplicable
+                        ? "cursor-pointer border-amber-300 bg-amber-50/50 hover:border-amber-500 dark:border-amber-500/30 dark:bg-amber-900/10"
                         : "cursor-pointer border-slate-300 bg-white hover:border-blue-500 hover:bg-slate-50 dark:border-white/5 dark:bg-black/20 dark:hover:border-white/10 dark:hover:bg-black/30"
             )}
         >
@@ -54,13 +56,13 @@ export const UpdateCard: React.FC<UpdateCardProps> = ({
                 {/* Checkbox Area */}
                 <div className={clsx(
                     "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors",
-                    isInapplicable
-                        ? "border-amber-500/50 text-amber-600 bg-amber-100 dark:bg-amber-900/20 dark:text-amber-400"
-                        : isSelected
-                            ? "border-blue-500 bg-blue-500 text-white"
+                    isSelected
+                        ? "border-blue-500 bg-blue-500 text-white"
+                        : isInapplicable
+                            ? "border-amber-500/50 text-amber-600 bg-amber-100 dark:bg-amber-900/20 dark:text-amber-400"
                             : "border-gray-400 bg-transparent text-transparent group-hover:border-blue-500 dark:border-gray-600"
                 )}>
-                    {isInapplicable ? <AlertCircle className="h-4 w-4" /> : <Check className="h-4 w-4" strokeWidth={3} />}
+                    {isInapplicable && !isSelected ? <AlertCircle className="h-4 w-4" /> : <Check className="h-4 w-4" strokeWidth={3} />}
                 </div>
 
                 <div className="min-w-0 flex-1 space-y-2">

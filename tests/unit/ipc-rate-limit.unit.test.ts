@@ -27,4 +27,19 @@ export async function run() {
 
   assert.equal(pruneState.has('old'), false);
   assert.equal(pruneState.has('fresh'), true);
+
+  const mixedWindowState = new Map<string, { windowStartedAt: number; count: number }>([
+    ['sender:diagnostics', { windowStartedAt: 0, count: 2 }]
+  ]);
+  pruneExpiredIpcRateLimits(mixedWindowState, 30000, 6000);
+  assert.equal(mixedWindowState.has('sender:diagnostics'), true);
+  assert.throws(
+    () => assertWithinIpcRateLimit(
+      mixedWindowState,
+      'sender:diagnostics',
+      { windowMs: 30000, maxCalls: 2 },
+      6000
+    ),
+    /Too many requests/
+  );
 }

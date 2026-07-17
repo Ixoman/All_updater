@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { CheckCircle, XCircle, AlertCircle, X } from 'lucide-react';
 import { clsx } from 'clsx';
+import { createToastAutoCloseHandler } from '../utils/toast-timer';
 
 export type ToastType = 'success' | 'error' | 'info' | 'warning';
 
@@ -13,12 +14,16 @@ interface ToastProps {
 }
 
 export const Toast: React.FC<ToastProps> = ({ id, message, type, onClose, duration = 5000 }) => {
+    const onCloseRef = useRef(onClose);
+
     useEffect(() => {
-        const timer = setTimeout(() => {
-            onClose(id);
-        }, duration);
+        onCloseRef.current = onClose;
+    }, [onClose]);
+
+    useEffect(() => {
+        const timer = setTimeout(createToastAutoCloseHandler(onCloseRef, id), duration);
         return () => clearTimeout(timer);
-    }, [id, duration, onClose]);
+    }, [id, duration]);
 
     const icons = {
         success: <CheckCircle className="h-5 w-5 text-emerald-500" />,

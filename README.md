@@ -99,46 +99,24 @@ npm run test:regression
 - `npm run test:integration`
 - `npm run test:regression`
 
-## Release Hardening
+## Build and Release
 
-This project is intended to distribute signed Windows artifacts.
+The default Windows build and release artifacts are currently unsigned. No signing certificate or signing environment variables are required.
 
-Preferred release commands:
+Default commands:
 
 ```powershell
 npm run build
 npm run release
 ```
 
-These commands route through the signed portable build flow and require signing configuration. If signing variables are missing, the release flow must stop instead of producing unsigned distribution artifacts.
-
-Signing and SmartScreen details are documented in `SIGNING_SMARTSCREEN.md`.
-
-Install repository hooks once:
+`npm run build` creates the portable `.exe`. `npm run release` also creates the versioned ZIP. To publish that ZIP explicitly:
 
 ```powershell
-npm run hooks:install
+npm run release:github
 ```
 
-## Local-Only Unsigned Builds
-
-Unsigned builds are allowed only for local debugging:
-
-```powershell
-npm run build:unsigned
-npm run build:portable:unsigned
-```
-
-## Temporary Owner-Approved Unsigned Release Flow
-
-Until a signing certificate is available again, the owner has approved a temporary explicit unsigned portable release flow:
-
-```powershell
-npm run release:portable:unsigned
-npm run release:portable:unsigned:github
-```
-
-Keep signed release commands as the default. Remove the temporary unsigned release commands from normal release workflow once signing is restored.
+Windows SmartScreen may show an unknown-publisher warning for these artifacts. Optional signing commands remain available for a future policy change and are documented in `SIGNING_SMARTSCREEN.md`.
 
 ## Important Files
 

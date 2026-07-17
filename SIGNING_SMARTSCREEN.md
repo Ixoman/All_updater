@@ -1,6 +1,8 @@
-# SmartScreen + Code Signing (Windows)
+# Optional SmartScreen + Code Signing (Windows)
 
-Este proyecto ya incluye flujo recurrente para firmar el `.exe` portable sin tocar la lógica de la app.
+La firma de código está desactivada como requisito del flujo normal. `npm run build`, `npm run release` y `npm run release:github` generan o publican artefactos unsigned sin requerir certificado.
+
+Los comandos de esta página se conservan sólo como capacidad opcional para el futuro.
 
 ## 1) Requisitos de firma
 
@@ -19,11 +21,9 @@ Y opcional/recomendado:
 - `npm run build:portable:signed`: build portable + `forceCodeSigning=true`
 - `npm run signing:verify-artifact`: valida firma Authenticode del `.exe`
 - `npm run release:portable:signed`: build firmado + verificación de firma
-- `npm run build:local`: build portable **sin firma** (solo pruebas locales)
-- `npm run release:local`: alias local para build portable **sin firma** (no publicar)
-- `npm run release:portable:unsigned`: build portable unsigned + ZIP versionado para distribución temporal
-- `npm run release:portable:unsigned:github`: build unsigned + ZIP + create/update del release en GitHub
-- `npm run hooks:install`: activa hooks de git del repo (`.githooks`)
+- `npm run build`: build portable unsigned predeterminado
+- `npm run release`: build portable unsigned + ZIP versionado
+- `npm run release:github`: build unsigned + ZIP + create/update del release en GitHub
 
 ## 3) Ejemplo rápido (PowerShell)
 
@@ -33,28 +33,12 @@ $env:WIN_CSC_KEY_PASSWORD = "TU_PASSWORD"
 npm run release:portable:signed
 ```
 
-Si el binario queda sin firma, el flujo falla (intencional).
+El comando explícito `release:portable:signed` falla si el binario queda sin firma. Esto no afecta los comandos predeterminados.
 
-## 3.1) Hook de protección en push
-
-Después de clonar el repo, ejecuta una vez:
+## 3.1) Flujo predeterminado sin firma
 
 ```powershell
-npm run hooks:install
-```
-
-El hook `pre-push` bloqueará push a:
-
-- `refs/tags/v*`
-
-si no detecta un artefacto firmado válido.
-
-## 3.2) Flujo temporal sin firma (solo mientras no haya certificado)
-
-Si todavía no tienes certificado de firma, el proyecto deja un flujo temporal explícito:
-
-```powershell
-npm run release:portable:unsigned
+npm run release
 ```
 
 Esto:
@@ -65,7 +49,7 @@ Esto:
 Y si además quieres publicar directo en GitHub:
 
 ```powershell
-npm run release:portable:unsigned:github
+npm run release:github
 ```
 
 Esto:
@@ -74,7 +58,7 @@ Esto:
 - empaqueta el ZIP versionado
 - crea o actualiza el release `vX.Y.Z` en GitHub usando `RELEASE_NOTES_vX.Y.Z.md`
 
-Este flujo es temporal y debe reemplazarse nuevamente por el release firmado cuando el certificado esté disponible.
+No existe un hook que bloquee tags o pushes por falta de firma.
 
 ## 4) Paso Defender (reputación SmartScreen)
 
@@ -82,7 +66,7 @@ Objetivo: acelerar reputación para reducir advertencias SmartScreen en equipos 
 
 ### Manual (recomendado para este proyecto)
 
-1. Publica release firmado.
+1. Publica un release. Si en el futuro vuelve a firmarse, usa el artefacto firmado.
 2. Sube el `.exe`/`.zip` al portal de Microsoft Security Intelligence:
    - `https://www.microsoft.com/wdsi/filesubmission`
 3. Selecciona categoría de software legítimo/false positive y agrega contexto:

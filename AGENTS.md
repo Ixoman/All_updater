@@ -1,34 +1,20 @@
 # Agent Build Policy
 
-This project must use **signed Windows artifacts** for any build/release intended for distribution.
+The project owner has approved unsigned Windows builds and releases as the default workflow until further notice.
+
+## Default commands
+
+- `npm run build`: creates the unsigned Windows portable artifact.
+- `npm run release`: creates the unsigned portable artifact and versioned ZIP.
+- `npm run release:github`: publishes that ZIP when a GitHub release is explicitly requested.
 
 ## Mandatory rules
 
-1. Do not publish or upload unsigned `.exe` artifacts.
-2. Preferred commands:
-   - `npm run build`
-   - `npm run release`
-3. These commands must run signing checks and fail if signing is not configured.
-4. If signing variables are missing, stop and report the issue instead of producing unsigned release artifacts.
+1. Do not claim that an artifact is signed when it is not.
+2. Do not require signing variables for normal build, test, release, or GitHub publishing flows.
+3. Keep the unsigned nature of distributed artifacts visible in release notes or publishing context when relevant.
+4. Do not deploy or publish unless the user explicitly requests it.
 
-## Allowed fallback for local-only debugging
+## Optional future signing
 
-- Unsigned builds are allowed only for local debugging and must not be released:
-  - `npm run build:unsigned`
-  - `npm run build:portable:unsigned`
-
-## Temporary owner-approved unsigned release exception
-
-Until a signing certificate is available again, the project owner has explicitly approved a temporary unsigned release flow.
-
-- Keep signed release commands as the default:
-  - `npm run build`
-  - `npm run release`
-- Use unsigned release commands only when an unsigned GitHub release is explicitly intended:
-  - `npm run release:portable:unsigned`
-  - `npm run release:portable:unsigned:github`
-- These unsigned commands are temporary and should be removed from the release workflow once signing is restored.
-
-## Signing docs
-
-- See `SIGNING_SMARTSCREEN.md` for certificate variables and SmartScreen reputation workflow.
+Explicit `*:signed` commands remain available only as an optional future capability. They are not part of the default build or release workflow.

@@ -54,6 +54,8 @@ export const isUpdateIgnoredByRule = (update: AppUpdate, rule: IgnoreRule): bool
     return normalizedRuleVersion === normalizeIgnoreVersion(update.available);
 };
 
+export const isUpdateSelectable = (update: AppUpdate): boolean => update.previousStatus !== 'skipped';
+
 export const parseInstallerFailurePayload = (errorMessage: string): InstallerFailurePayload | null => {
     const marker = 'InstallerFailed:';
     const markerIndex = errorMessage.indexOf(marker);

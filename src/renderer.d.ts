@@ -33,7 +33,7 @@ interface RendererEventMap {
 
 export interface IElectronAPI {
     invoke(channel: 'winget:check-updates'): Promise<AppUpdate[]>;
-    invoke(channel: 'winget:install-update', id: string): Promise<void>;
+    invoke(channel: 'winget:install-update', id: string, source?: string): Promise<void>;
     invoke(channel: 'winget:get-release-notes-url', id: string): Promise<string | null>;
     invoke(channel: 'winget:get-health'): Promise<WingetHealthStatus>;
     invoke(channel: 'system:create-restore-point', description: string): Promise<RestorePointResult>;

@@ -29,6 +29,7 @@ import { clsx } from 'clsx';
 import {
   buildIgnoreRuleKey,
   isUpdateIgnoredByRule,
+  isUpdateSelectable,
 } from './utils/app-helpers';
 
 interface ToastItem {
@@ -331,9 +332,9 @@ export default function App() {
     }
   };
 
-  const removeToast = (id: string) => {
+  const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
-  };
+  }, []);
 
   const addHistoryEntrySafely = async (entry: Omit<HistoryItem, 'date'>): Promise<void> => {
     try {
@@ -477,8 +478,7 @@ export default function App() {
 
       setUpdates(filteredAvailable);
       void prefetchReleaseNotesForUpdates(filteredAvailable);
-      // Only auto-select updates that are NOT inapplicable
-      const installable = filteredAvailable.filter((u) => u.previousStatus !== 'inapplicable');
+      const installable = filteredAvailable.filter(isUpdateSelectable);
       const installableIds = new Set(installable.map((u) => u.id));
       setSelectedIds((previous) => {
         const preserved = new Set(Array.from(previous).filter((id) => installableIds.has(id)));

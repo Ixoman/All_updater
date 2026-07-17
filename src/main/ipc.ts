@@ -12,6 +12,7 @@ import { PreflightService } from './services/preflight.js';
 import { DiagnosticsService } from './services/diagnostics.js';
 import { IgnoreService } from './services/ignore.js';
 import { assertWithinIpcRateLimit, pruneExpiredIpcRateLimits, type IpcRateLimitConfig } from './ipc-rate-limit.js';
+import { validateRestoreVerificationInput } from './restore-validation.js';
 import type { HistoryItem } from '../shared/types.js';
 import log from 'electron-log/main'; // Import directly to access transport
 
@@ -20,7 +21,7 @@ const restoreService = new SystemRestoreService();
 const settingsService = new SettingsService();
 const logger = new LoggerService();
 const systemService = new SystemService();
-const wingetService = new WingetService(systemService, historyService);
+const wingetService = new WingetService(historyService);
 const appUpdateService = new AppUpdateService();
 const preflightService = new PreflightService();
 const diagnosticsService = new DiagnosticsService(logger);
@@ -36,6 +37,7 @@ const IPC_RATE_LIMITS = {
     systemRunPreflight: { windowMs: 10000, maxCalls: 3 },
     systemExportDiagnostics: { windowMs: 30000, maxCalls: 2 }
 } satisfies Record<string, IpcRateLimitConfig>;
+const IPC_RATE_LIMIT_MAX_WINDOW_MS = Math.max(...Object.values(IPC_RATE_LIMITS).map(({ windowMs }) => windowMs));
 
 const settingKeys: readonly (keyof UserSettings)[] = [
     'theme',
@@ -183,6 +185,24 @@ function validateOptionalVersionInput(version: unknown): string | undefined {
     return trimmed;
 }
 
+function validateOptionalSourceInput(source: unknown): string | undefined {
+    if (source === undefined || source === null) return undefined;
+    if (typeof source !== 'string') {
+        throw new Error('Invalid package source');
+    }
+
+    const trimmed = source.trim();
+    if (
+        !trimmed ||
+        trimmed.length > 128 ||
+        Array.from(trimmed).some((char) => char.charCodeAt(0) < 32)
+    ) {
+        throw new Error('Invalid package source');
+    }
+
+    return trimmed;
+}
+
 function normalizePathForPolicy(targetPath: string): string {
     const resolved = path.resolve(targetPath);
     try {
@@ -236,7 +256,7 @@ function enforceIpcRateLimit(
     config: IpcRateLimitConfig
 ): void {
     const key = `${event.sender.id}:${channel}`;
-    pruneExpiredIpcRateLimits(ipcRateLimitState, config.windowMs);
+    pruneExpiredIpcRateLimits(ipcRateLimitState, IPC_RATE_LIMIT_MAX_WINDOW_MS);
     assertWithinIpcRateLimit(ipcRateLimitState, key, config);
 }
 
@@ -253,20 +273,22 @@ export function setupIPC() {
 
     console.log('[IPC] IPC handlers registered successfully');
 
-    ipcMain.handle('winget:install-update', async (event, id: string) => {
-        logger.info(`Installing update for ${id}`);
+    ipcMain.handle('winget:install-update', async (event, id: unknown, source: unknown) => {
+        const packageId = validatePackageIdInput(id);
+        const packageSource = validateOptionalSourceInput(source);
+        logger.info(`Installing update for ${packageId}${packageSource ? ` from ${packageSource}` : ''}`);
         try {
-            return await wingetService.installUpdate(id, (logLine) => {
+            return await wingetService.installUpdate(packageId, (logLine) => {
                 event.sender.send('winget:log', logLine);
-            });
+            }, packageSource);
         } catch (error) {
             const typedError = error as Error & { technicalDetails?: string };
             const errorMessage = typedError?.message || String(error);
             const technicalDetails = typedError?.technicalDetails;
             logger.error(
                 technicalDetails
-                    ? `Install failed for ${id}: ${errorMessage} | details: ${technicalDetails}`
-                    : `Install failed for ${id}: ${errorMessage}`
+                    ? `Install failed for ${packageId}: ${errorMessage} | details: ${technicalDetails}`
+                    : `Install failed for ${packageId}: ${errorMessage}`
             );
             throw error;
         }
@@ -304,16 +326,17 @@ export function setupIPC() {
         return result;
     });
 
-    ipcMain.handle('system:verify-restore-point', async (_, sequenceNumber: number, description: string) => {
-        logger.info(`Verifying restore point after batch. sequence=${sequenceNumber} description="${description}"`);
-        const result = await restoreService.verifyRestorePoint(sequenceNumber, description);
+    ipcMain.handle('system:verify-restore-point', async (_, sequenceNumber: unknown, description: unknown) => {
+        const input = validateRestoreVerificationInput(sequenceNumber, description);
+        logger.info(`Verifying restore point after batch. sequence=${input.sequenceNumber} description="${input.description}"`);
+        const result = await restoreService.verifyRestorePoint(input.sequenceNumber, input.description);
         if (result.confirmed) {
             logger.info(
-                `Restore point still confirmed after batch. sequence=${result.sequenceNumber} description="${result.actualDescription || description}"`
+                `Restore point still confirmed after batch. sequence=${result.sequenceNumber} description="${result.actualDescription || input.description}"`
             );
         } else {
             logger.warn(
-                `Restore point could not be confirmed after batch. sequence=${sequenceNumber} description="${description}" details=${result.details || 'n/a'}`
+                `Restore point could not be confirmed after batch. sequence=${input.sequenceNumber} description="${input.description}" details=${result.details || 'n/a'}`
             );
         }
         return result;

@@ -9,6 +9,10 @@ import type {
     AppUpdateDownloadResult,
     AppVersionCheckResult
 } from '../../shared/types';
+import {
+    createSignaturePowerShellInvocation,
+    createZipExpandPowerShellInvocation
+} from '../powershell-invocation.js';
 
 interface GitHubReleaseAsset {
     name: string;
@@ -482,22 +486,22 @@ export class AppUpdateService {
     private async verifyExecutableSignature(filePath: string): Promise<SignatureVerificationResult> {
         try {
             const { execa } = await import('execa');
-            const script = [
-                '$sig = Get-AuthenticodeSignature -LiteralPath $args[0]',
-                '[pscustomobject]@{',
-                'Status = [string]$sig.Status;',
-                'StatusMessage = [string]$sig.StatusMessage;',
-                'Subject = [string]$sig.SignerCertificate.Subject',
-                '} | ConvertTo-Json -Compress'
-            ].join(' ');
-            const { stdout } = await execa('powershell', [
+            const invocation = createSignaturePowerShellInvocation(filePath);
+            const result = await execa('powershell', [
                 '-NoProfile',
                 '-NonInteractive',
                 '-Command',
-                script,
-                filePath
-            ], { reject: false, timeout: 30000 });
-            const record = this.readJsonRecord(stdout.trim());
+                invocation.script
+            ], { reject: false, timeout: 30000, env: invocation.env });
+            if (result.exitCode !== 0) {
+                return {
+                    verified: false,
+                    status: 'unknown',
+                    message: result.stderr || `Signature inspection failed with exit code ${result.exitCode}.`
+                };
+            }
+
+            const record = this.readJsonRecord(result.stdout.trim());
             const status = typeof record?.Status === 'string' ? record.Status : 'Unknown';
             const message = typeof record?.StatusMessage === 'string' ? record.StatusMessage : undefined;
             const subject = typeof record?.Subject === 'string' && record.Subject.trim() ? record.Subject.trim() : undefined;
@@ -542,15 +546,13 @@ export class AppUpdateService {
 
         try {
             const { execa } = await import('execa');
-            const script = 'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force';
+            const invocation = createZipExpandPowerShellInvocation(filePath, tempFolder);
             const expand = await execa('powershell', [
                 '-NoProfile',
                 '-NonInteractive',
                 '-Command',
-                script,
-                filePath,
-                tempFolder
-            ], { reject: false, timeout: 60000 });
+                invocation.script
+            ], { reject: false, timeout: 60000, env: invocation.env });
             if (expand.exitCode !== 0) {
                 return { verified: false, status: 'unknown', message: expand.stderr || 'Could not inspect ZIP contents.' };
             }

@@ -1,10 +1,20 @@
 import { execa } from 'execa';
 import type { AppUpdate, WingetHealthStatus } from '../../shared/types.js';
 import type { HistoryService } from './history.js';
-import { SystemService } from './system.js';
+import {
+    buildWingetForceInstallArgs,
+    buildWingetUpgradeArgs,
+    mapTechnologyFallbackError
+} from '../winget-install.js';
+
+interface WingetCommandResult {
+    stdout: string;
+    stderr: string;
+    all: string;
+    exitCode: number | null;
+}
 
 export class WingetService {
-    private systemService: SystemService;
     private historyService?: Pick<HistoryService, 'getHistory'>;
     private readonly debugWinget = process.env.ALL_UPDATER_DEBUG_WINGET === '1';
     private readonly unknownVersionCooldownMs = 12 * 60 * 60 * 1000;
@@ -12,8 +22,7 @@ export class WingetService {
     private readonly watchdogCheckMs = 5000;
     private isOnline = true;
 
-    constructor(systemService: SystemService = new SystemService(), historyService?: Pick<HistoryService, 'getHistory'>) {
-        this.systemService = systemService;
+    constructor(historyService?: Pick<HistoryService, 'getHistory'>) {
         this.historyService = historyService;
     }
 
@@ -38,7 +47,7 @@ export class WingetService {
     private async runWingetCommandWithFallback(
         args: string[],
         options: { timeout: number, includeAll: boolean }
-    ): Promise<{ stdout: string, stderr: string, all: string }> {
+    ): Promise<WingetCommandResult> {
         const deadline = Date.now() + options.timeout;
         const queue: string[][] = [
             [...args, '--disable-interactivity'],
@@ -79,10 +88,19 @@ export class WingetService {
                 continue;
             }
 
-            return { stdout, stderr, all: allOutput };
+            return { stdout, stderr, all: allOutput, exitCode: result.exitCode ?? null };
         }
 
-        return { stdout: '', stderr: '', all: '' };
+        return { stdout: '', stderr: '', all: '', exitCode: null };
+    }
+
+    private assertSuccessfulWingetQuery(result: WingetCommandResult): void {
+        if (result.exitCode === 0 || this.containsNoUpdatesMessage(result.all)) return;
+
+        const output = result.all.trim();
+        throw new Error(
+            `WingetCommandFailed: exitCode=${result.exitCode ?? 'null'}; ${output || 'Winget returned no diagnostic output.'}`
+        );
     }
 
     private containsNoUpdatesMessage(output: string): boolean {
@@ -245,14 +263,6 @@ export class WingetService {
         }
     }
 
-    private hasPotentialPackageLikeLine(lines: string[]): boolean {
-        return lines.some((line) => {
-            const trimmed = line.trim();
-            if (!trimmed || this.isIgnorableOutputLine(trimmed) || this.isSeparatorLine(trimmed)) return false;
-            return /\b[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+){1,}\b/.test(trimmed) || /\b[A-Z0-9]{8,}\b/.test(trimmed);
-        });
-    }
-
     private isOutputEffectivelyEmptyOrNoise(output: string): boolean {
         if (!output.trim()) return true;
         if (this.containsNoUpdatesMessage(output)) return true;
@@ -262,7 +272,7 @@ export class WingetService {
         const cleaned = output.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '\n');
         const lines = cleaned.split('\n');
         if (this.areAllNonEmptyLinesIgnorable(lines)) return true;
-        return !this.hasPotentialPackageLikeLine(lines);
+        return false;
     }
 
     async getAvailableUpdates(): Promise<AppUpdate[]> {
@@ -280,6 +290,7 @@ export class WingetService {
                     timeout: 60000,
                     includeAll: true
                 });
+                this.assertSuccessfulWingetQuery(textResult);
                 textOutput = textResult.all;
                 this.debug('[WingetService] Winget text command finished. Parsing output...');
                 this.debug('[WingetService] Raw stdout length:', textOutput.length);
@@ -296,6 +307,7 @@ export class WingetService {
                             ['upgrade', '--include-unknown', '--accept-source-agreements', '--accept-package-agreements'],
                             { timeout: 45000, includeAll: true }
                         );
+                        this.assertSuccessfulWingetQuery(retryResult);
                         textOutput = retryResult.all;
                         retriedWithUpgrade = true;
                         try {
@@ -332,6 +344,7 @@ export class WingetService {
                         includeAll: true
                     }
                 );
+                this.assertSuccessfulWingetQuery(retryResult);
                 updates = this.isOutputEffectivelyEmptyOrNoise(retryResult.all)
                     ? []
                     : this.parseWingetOutput(retryResult.all);
@@ -662,19 +675,9 @@ export class WingetService {
         return true;
     }
 
-    async installUpdate(id: string, onLog?: (log: string) => void): Promise<void> {
+    async installUpdate(id: string, onLog?: (log: string) => void, source?: string): Promise<void> {
         this.debug(`[WingetService] Installing update: ${id}`);
-        const arch = this.systemService.getWingetArch();
-
-        const baseArgs = [
-            'upgrade',
-            '--id', id,
-            '--silent',
-            '--architecture', arch,
-            '--include-unknown',
-            '--accept-package-agreements',
-            '--accept-source-agreements'
-        ];
+        const baseArgs = buildWingetUpgradeArgs(id, source);
 
         const runCmd = async (args: string[]) => {
             const subprocess = execa('winget', args, { all: true });
@@ -837,21 +840,13 @@ export class WingetService {
                     console.warn(`[WingetService] Tech mismatch for ${id}. Attempting fallback to 'install --force'...`);
                     try {
                         // Use 'install' instead of 'upgrade' to bypass the check, with --force
-                        const fallbackArgs = [
-                            'install',
-                            '--id', id,
-                            '--silent',
-                            '--force',
-                            '--architecture', arch,
-                            '--accept-package-agreements',
-                            '--accept-source-agreements'
-                        ];
-                        await execa('winget', fallbackArgs);
+                        const fallbackArgs = buildWingetForceInstallArgs(id, source);
+                        await runCmd(fallbackArgs);
                         this.debug(`[WingetService] Force install fallback for ${id} succeeded.`);
                         return;
                     } catch (fallbackError: unknown) {
                         console.error(`[WingetService] Force install fallback for ${id} failed:`, fallbackError);
-                        throw new Error(`Inapplicable: Manual uninstall required. Different installation technology and force install failed.`);
+                        throw mapTechnologyFallbackError(fallbackError);
                     }
                 }
 
@@ -964,15 +959,10 @@ export class WingetService {
                     timeout: 60000,
                     includeAll: false
                 });
+                this.assertSuccessfulWingetQuery(jsonResult);
                 const parsed = this.parseWingetJsonOutput(jsonResult.stdout);
                 if (parsed !== null) {
-                    if (parsed.length > 0) {
-                        return parsed;
-                    }
-
-                    if (this.isOutputEffectivelyEmptyOrNoise(jsonResult.all)) {
-                        return [];
-                    }
+                    return parsed;
                 }
             } catch (error) {
                 console.warn('[WingetService] JSON output parsing failed, falling back to text parser:', error);
@@ -1238,7 +1228,10 @@ export class WingetService {
             .filter(line => !this.isIgnorableOutputLine(line) && !this.isSeparatorLine(line));
         const hasParsableRows = candidateLines.some(line => this.parseDataLineByTokens(line) !== null);
         if (!hasParsableRows) {
-            return [];
+            if (this.isOutputEffectivelyEmptyOrNoise(output)) {
+                return [];
+            }
+            throw new Error('WingetOutputParseError: Could not parse updates table from winget output.');
         }
 
         if (this.isOutputEffectivelyEmptyOrNoise(output)) {

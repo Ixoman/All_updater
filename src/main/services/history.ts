@@ -1,7 +1,7 @@
 import Store from 'electron-store';
 import fs from 'node:fs';
-import path from 'node:path';
 import type { HistoryItem } from '../../shared/types.js';
+import { clearHistoryStore, getHistoryBackupPath } from '../history-storage.js';
 
 interface HistoryData {
     items: HistoryItem[];
@@ -45,7 +45,7 @@ export class HistoryService {
         try {
             const sourcePath = this.store.path;
             if (!fs.existsSync(sourcePath)) return;
-            const backupPath = path.join(path.dirname(sourcePath), `${path.parse(sourcePath).name}.bak.json`);
+            const backupPath = getHistoryBackupPath(sourcePath);
             fs.copyFileSync(sourcePath, backupPath);
         } catch (error) {
             console.error('[HistoryService] Failed to backup history file:', error);
@@ -76,7 +76,6 @@ export class HistoryService {
     }
 
     clearHistory(): void {
-        this.backupStoreFile();
-        this.store.set('items', []);
+        clearHistoryStore(this.store);
     }
 }
