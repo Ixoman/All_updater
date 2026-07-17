@@ -1,7 +1,7 @@
 {
   "name": "all-updater",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {

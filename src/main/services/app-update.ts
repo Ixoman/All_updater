@@ -13,6 +13,7 @@ import {
     createSignaturePowerShellInvocation,
     createZipExpandPowerShellInvocation
 } from '../powershell-invocation.js';
+import { isAllowedGitHubDownloadHost } from '../app-update-validation.js';
 
 interface GitHubReleaseAsset {
     name: string;
@@ -207,10 +208,6 @@ export class AppUpdateService {
         } catch {
             // Audit logging must never block update checks or downloads.
         }
-    }
-
-    private isAllowedDownloadHost(hostname: string): boolean {
-        return hostname === 'github.com' || hostname.endsWith('.github.com') || hostname === 'objects.githubusercontent.com';
     }
 
     private isExpectedReleaseUrl(rawUrl: string, tagName: string): boolean {
@@ -684,7 +681,7 @@ export class AppUpdateService {
             const totalBytes = Number.parseInt(response.headers.get('content-length') || '0', 10) || 0;
             if (response.url) {
                 const responseUrl = new URL(response.url);
-                if (responseUrl.protocol !== 'https:' || !this.isAllowedDownloadHost(responseUrl.hostname)) {
+                if (responseUrl.protocol !== 'https:' || !isAllowedGitHubDownloadHost(responseUrl.hostname)) {
                     this.writeAuditEvent('download-failed', { assetName: safeFileName, reason: 'untrusted-redirect', host: responseUrl.hostname });
                     return { success: false, error: 'Download redirected to an untrusted host.' };
                 }
